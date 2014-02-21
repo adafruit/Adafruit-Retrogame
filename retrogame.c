@@ -84,18 +84,9 @@ struct {
 	int key;
 } io[] = {
 //	  Input    Output (from /usr/include/linux/input.h)
-#if 1
-	// Use this table for the basic retro gaming project:
-	{ 25,      KEY_LEFT     }, // Joystick (4 pins)
-	{  9,      KEY_RIGHT    },
-	{ 10,      KEY_UP       },
-	{ 17,      KEY_DOWN     },
-	{ 23,      KEY_LEFTCTRL }, // Fire/jump/primary
-	{  7,      KEY_LEFTALT  }  // Bomb/secondary
-	// For credit/start/etc., use USB keyboard or add more buttons.
-#else
-	// Use this table for the Picade project.  Pinouts are different
-	// because the PiTFT requires exclusive use of certain pins.
+#ifdef PICADE
+	// Use this table for the Picade project (w/PiTFT).
+	// To compile, type:    make clean; make CFLAGS=-DPICADE
 	{  2,      KEY_LEFT     }, // Joystick (4 pins)
 	{  3,      KEY_RIGHT    },
 	{  4,      KEY_UP       },
@@ -107,6 +98,15 @@ struct {
 	// GPIO options are 'maxed out' with PiTFT + above table.
 	// If additional buttons are desired, will need to disable
 	// serial console and/or use P5 header.  Or use keyboard.
+#else
+	// Use this table for the basic retro gaming project:
+	{ 25,      KEY_LEFT     }, // Joystick (4 pins)
+	{  9,      KEY_RIGHT    },
+	{ 10,      KEY_UP       },
+	{ 17,      KEY_DOWN     },
+	{ 23,      KEY_LEFTCTRL }, // Fire/jump/primary
+	{  7,      KEY_LEFTALT  }  // Bomb/secondary
+	// For credit/start/etc., use USB keyboard or add more buttons.
 #endif
 };
 #define IOLEN (sizeof(io) / sizeof(io[0])) // io[] table size
