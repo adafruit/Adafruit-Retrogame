@@ -84,14 +84,41 @@ struct {
 	int key;
 } io[] = {
 //	  Input    Output (from /usr/include/linux/input.h)
-	{ 25,      KEY_LEFT     },
+#if 1
+	// Use this table for the basic retro gaming project:
+	{ 25,      KEY_LEFT     }, // Joystick (4 pins)
 	{  9,      KEY_RIGHT    },
 	{ 10,      KEY_UP       },
 	{ 17,      KEY_DOWN     },
-	{ 23,      KEY_LEFTCTRL },
-	{  7,      KEY_LEFTALT  }
+	{ 23,      KEY_LEFTCTRL }, // Fire/jump/primary
+	{  7,      KEY_LEFTALT  }  // Bomb/secondary
+	// For credit/start/etc., use USB keyboard or add more buttons.
+#else
+	// Use this table for the Picade project.  Pinouts are different
+	// because the PiTFT requires exclusive use of certain pins.
+	{  2,      KEY_LEFT     }, // Joystick (4 pins)
+	{  3,      KEY_RIGHT    },
+	{  4,      KEY_UP       },
+	{ 17,      KEY_DOWN     },
+	{ 22,      KEY_LEFTCTRL }, // Fire/jump/primary
+	{ 27,      KEY_LEFTALT  }, // Bomb/secondary
+	{ 23,      KEY_5        }, // Credit
+	{ 18,      KEY_1        }  // Start 1P
+	// GPIO options are 'maxed out' with PiTFT + above table.
+	// If additional buttons are desired, will need to disable
+	// serial console and/or use P5 header.  Or use keyboard.
+#endif
 };
 #define IOLEN (sizeof(io) / sizeof(io[0])) // io[] table size
+
+// A "Vulcan nerve pinch" (holding down a specific button combination for
+// a few seconds) initiates an orderly system shutdown.  The button combo
+// is configured with a bitmask corresponding to elements in the above io[]
+// array.  The default value here uses elements 6 and 7 (credit and start
+// in the Picade pinout).  If you change this, make certain it's a combo
+// that's not likely to occur during actual gameplay (i.e. avoid using
+// joystick directions or hold-for-rapid-fire buttons here).
+const unsigned long vulcanMask = (1L << 6) | (1L << 7);
 
 
 // A few globals ---------------------------------------------------------
@@ -102,6 +129,9 @@ char
    running      = 1;                 // Signal handler will set to 0 (exit)
 volatile unsigned int
   *gpio;                             // GPIO register table
+const int
+   debounceTime = 20,                // 20 ms for button debouncing
+   shutdownTime = 3000;              // 3 sec Vulcan hold for shutdown
 
 
 // Some utility functions ------------------------------------------------
@@ -173,6 +203,7 @@ int main(int argc, char *argv[]) {
 	                       timeout = -1,    // poll() timeout
 	                       intstate[IOLEN], // Last-read state
 	                       extstate[IOLEN]; // Debounced state
+	unsigned long          bitMask, bit;    // For Vulcan pinch detect
 	volatile unsigned char shortWait;       // Delay counter
 	struct uinput_user_dev uidev;           // uinput device
 	struct input_event     keyEv, synEv;    // uinput events
@@ -313,12 +344,15 @@ int main(int argc, char *argv[]) {
 					p[i].revents = 0; // Clear flag
 				}
 			}
-			timeout = 20; // Set timeout for debounce
-		} else { // Else timeout occurred; input is debounced
+			timeout = debounceTime; // Set timeout for debounce
+			// Else timeout occurred
+		} else if(timeout == debounceTime) { // Button debounce timeout
 			// 'j' (number of non-GNDs) is re-counted as
 			// it's easier than maintaining an additional
 			// remapping table or a duplicate key[] list.
-			for(c=i=j=0; i<IOLEN; i++) {
+			bitMask = 0L; // Mask of buttons currently pressed
+			bit     = 1L;
+			for(c=i=j=0; i<IOLEN; i++, bit<<=1) {
 				if(io[i].key != GND) {
 					// Compare internal state against
 					// previously-issued value.  Send
@@ -332,10 +366,21 @@ int main(int argc, char *argv[]) {
 						c = 1; // Follow w/SYN event
 					}
 					j++;
+					if(intstate[i]) bitMask |= bit;
 				}
 			}
 			if(c) write(fd, &synEv, sizeof(synEv));
-			timeout = -1; // Return to normal IRQ monitoring
+
+			// If the "Vulcan nerve pinch" buttons are currently
+			// pressed, set long timeout -- if this time elapses
+			// without a button state change, a shutdown will be
+			// initiated.  Or, if not currently pressed, return
+			// to normal IRQ monitoring (no timeout).
+			timeout = ((bitMask & vulcanMask) == vulcanMask) ?
+			  shutdownTime : -1;
+		} else { // Vulcan timeout occurred -- halt system
+			(void)system("shutdown -h now");
+			running = 0;
 		}
 	}
 
