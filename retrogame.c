@@ -8,22 +8,26 @@ Connect one side of button(s) to GND pin (there are several on the GPIO
 header, but see later notes) and the other side to GPIO pin of interest.
 Internal pullups are used; no resistors required.  Avoid pins 8 and 10;
 these are configured as a serial port by default on most systems (this
-can be disabled but takes some doing).  GPIO 18 should likewise be
-avoided; it's shared with audio output.  Pin configuration is currently
+can be disabled but takes some doing).  Pin configuration is currently
 set in global table; no config file yet.  See later comments.
 
-Must be run as root, i.e. 'sudo retrogame' or configure init scripts to
-launch automatically at system startup.
+Must be run as root, i.e. 'sudo ./retrogame &' or configure init scripts
+to launch automatically at system startup.
 
 Requires uinput kernel module.  This is typically present on popular
-Raspberry Pi Linux distributions but not enabled by default.  To enable,
-either type:
+Raspberry Pi Linux distributions but not enabled on some older varieties.
+To enable, either type:
 
     sudo modprobe uinput
 
 Or, to make this persistent between reboots, add a line to /etc/modules:
 
     uinput
+
+To use with the Picade project (w/Adafruit PiTFT and menu util), retrogame
+must be recompiled with PICADE #defined, i.e.:
+
+    make clean; make CFLAGS=-DPICADE
 
 Written by Phil Burgess for Adafruit Industries, distributed under BSD
 License.  Adafruit invests time and resources providing this open source
@@ -91,10 +95,13 @@ struct {
 	{  3,      KEY_RIGHT    },
 	{  4,      KEY_UP       },
 	{ 17,      KEY_DOWN     },
-	{ 22,      KEY_LEFTCTRL }, // Fire/jump/primary
-	{ 27,      KEY_LEFTALT  }, // Bomb/secondary
+	{ 22,      KEY_Z        }, // Fire/jump/primary
+	{ 27,      KEY_X        }, // Bomb/secondary
 	{ 23,      KEY_5        }, // Credit
 	{ 18,      KEY_1        }  // Start 1P
+	// MAME must be configured with 'z' & 'x' as buttons 1 & 2 -
+	// this was required for the accompanying 'menu' utility to
+	// work (catching crtl/alt w/ncurses gets totally NASTY).
 	// GPIO options are 'maxed out' with PiTFT + above table.
 	// If additional buttons are desired, will need to disable
 	// serial console and/or use P5 header.  Or use keyboard.
@@ -111,14 +118,17 @@ struct {
 };
 #define IOLEN (sizeof(io) / sizeof(io[0])) // io[] table size
 
-// A "Vulcan nerve pinch" (holding down a specific button combination for
-// a few seconds) initiates an orderly system shutdown.  The button combo
-// is configured with a bitmask corresponding to elements in the above io[]
+// A "Vulcan nerve pinch" (holding down a specific button combination
+// for a few seconds) issues an 'esc' keypress to MAME (which brings up
+// an exit menu or quits the current game).  The button combo is
+// configured with a bitmask corresponding to elements in the above io[]
 // array.  The default value here uses elements 6 and 7 (credit and start
 // in the Picade pinout).  If you change this, make certain it's a combo
 // that's not likely to occur during actual gameplay (i.e. avoid using
-// joystick directions or hold-for-rapid-fire buttons here).
+// joystick directions or hold-for-rapid-fire buttons).
 const unsigned long vulcanMask = (1L << 6) | (1L << 7);
+const int           vulcanKey  = KEY_ESC, // Keycode to send
+                    vulcanTime = 1500;    // Pinch time in milliseconds
 
 
 // A few globals ---------------------------------------------------------
@@ -130,8 +140,7 @@ char
 volatile unsigned int
   *gpio;                             // GPIO register table
 const int
-   debounceTime = 20,                // 20 ms for button debouncing
-   shutdownTime = 3000;              // 3 sec Vulcan hold for shutdown
+   debounceTime = 20;                // 20 ms for button debouncing
 
 
 // Some utility functions ------------------------------------------------
@@ -171,7 +180,7 @@ void cleanup() {
 void err(char *msg) {
 	printf("%s: %s.  Try 'sudo %s'.\n", progName, msg, progName);
 	cleanup();
-	exit(-1);
+	exit(1);
 }
 
 // Interrupt handler -- set global flag to abort main loop.
@@ -302,6 +311,7 @@ int main(int argc, char *argv[]) {
 				err("Can't SET_KEYBIT");
 		}
 	}
+	if(ioctl(fd, UI_SET_KEYBIT, vulcanKey) < 0) err("Can't SET_KEYBIT");
 	memset(&uidev, 0, sizeof(uidev));
 	snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "retrogame");
 	uidev.id.bustype = BUS_USB;
@@ -373,14 +383,25 @@ int main(int argc, char *argv[]) {
 
 			// If the "Vulcan nerve pinch" buttons are currently
 			// pressed, set long timeout -- if this time elapses
-			// without a button state change, a shutdown will be
-			// initiated.  Or, if not currently pressed, return
-			// to normal IRQ monitoring (no timeout).
+			// without a button state change, an esc keypress
+			// will be sent.  Or, if not currently pressed,
+			// return to normal IRQ monitoring (no timeout).
 			timeout = ((bitMask & vulcanMask) == vulcanMask) ?
-			  shutdownTime : -1;
-		} else { // Vulcan timeout occurred -- halt system
+			  vulcanTime : -1;
+		} else if(timeout != -1) { // Vulcan timeout occurred
+#if 0 // Old behavior did a shutdown
 			(void)system("shutdown -h now");
-			running = 0;
+#else // Send keycode instead (MAME exits or displays exit menu)
+			keyEv.code = vulcanKey;
+			for(i=1; i>= 0; i--) { // Press, release
+				keyEv.value = i;
+				write(fd, &keyEv, sizeof(keyEv));
+				usleep(10000); // Be slow, else MAME flakes
+				write(fd, &synEv, sizeof(synEv));
+				usleep(10000);
+			}
+			timeout = -1; // Return to normal processing
+#endif
 		}
 	}
 
