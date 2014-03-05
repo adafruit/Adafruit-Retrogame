@@ -93,10 +93,10 @@ struct {
 	// To compile, type:    make clean; make CFLAGS=-DPICADE
 	{  2,      KEY_LEFT     }, // Joystick (4 pins)
 	{  3,      KEY_RIGHT    },
-	{  4,      KEY_UP       },
-	{ 17,      KEY_DOWN     },
-	{ 22,      KEY_Z        }, // Fire/jump/primary
-	{ 27,      KEY_X        }, // Bomb/secondary
+	{  4,      KEY_DOWN     },
+	{ 17,      KEY_UP       },
+	{ 27,      KEY_Z        }, // Fire/jump/primary
+	{ 22,      KEY_X        }, // Bomb/secondary
 	{ 23,      KEY_5        }, // Credit
 	{ 18,      KEY_1        }  // Start 1P
 	// MAME must be configured with 'z' & 'x' as buttons 1 & 2 -
