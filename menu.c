@@ -307,20 +307,13 @@ int main(int argc, char *argv[]) {
 	set_escdelay(0);
 	curs_set(0);
 
-	// Determine if screen is in portrait or landscape mode,
-	// get path to corresponding advmame config file.
-	// The portrait/landscape detection is far from bulletproof.
-	// Comparing COLS/LINES against each other is inadequate as
-	// the console font might not be square, so currently this just
-	// gauges COLS, which assumes use of the Terminus 6x12 font.
-	// Could read FONTSIZE value from etc/default/console-setup,
-	// but this file and value aren't guaranteed to exist.
-	// Could read the rotate value from /boot/adafruit.conf, but
-	// again...just...blargh, nothing's guaranteed.
-	c   = (COLS > 40) ? cfgWide : cfgTall;
+	// Determine if screen is in portrait or landscape mode, get
+	// path to corresponding advmame config file.  Method is to
+	// check for 'rotate=0' in module config file.  If it's present
+	// (system() returns 0), is portrait screen, else landscape.
+	c = system("grep rotate=0 /etc/modprobe.d/adafruit.conf") ?
+	    cfgWide : cfgTall;
 	if(NULL == (cfg = fullPath(c))) {
-		clear();
-		refresh();
 		endwin();
 		(void)printf("%s: malloc() fail (cfg)\n", argv[0]);
 		return 1;
@@ -358,9 +351,13 @@ int main(int argc, char *argv[]) {
 		   case 'r': // Re-scan ROM folder
 			find_roms();
 			break;
+		   case 'R': // Rotate-and-reboot
+			if(!geteuid()) { // Must be root
+				endwin();
+				system("sed -i 's/rotate=90/foo/;s/rotate=0/rotate=90/;s/foo/rotate=0/' /etc/modprobe.d/adafruit.conf; reboot");
+			}
+			break;
 		   case 27: // Esc = shutdown (if run as root) or quit
-			clear();
-			refresh();
 			endwin();
 			if(geteuid()) return 0; // Not root, quit to console
 			(void)system("shutdown -h now");
@@ -385,4 +382,5 @@ int main(int argc, char *argv[]) {
 
 	return 0;
 }
+
 
