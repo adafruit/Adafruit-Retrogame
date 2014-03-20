@@ -24,10 +24,10 @@ Or, to make this persistent between reboots, add a line to /etc/modules:
 
     uinput
 
-To use with the Picade project (w/Adafruit PiTFT and menu util), retrogame
-must be recompiled with PICADE #defined, i.e.:
+To use with the Cupcade project (w/Adafruit PiTFT and menu util), retrogame
+must be recompiled with CUPCADE #defined, i.e.:
 
-    make clean; make CFLAGS=-DPICADE
+    make clean; make CFLAGS=-DCUPCADE
 
 Written by Phil Burgess for Adafruit Industries, distributed under BSD
 License.  Adafruit invests time and resources providing this open source
@@ -88,9 +88,9 @@ struct {
 	int key;
 } io[] = {
 //	  Input    Output (from /usr/include/linux/input.h)
-#ifdef PICADE
-	// Use this table for the Picade project (w/PiTFT).
-	// To compile, type:    make clean; make CFLAGS=-DPICADE
+#ifdef CUPCADE
+	// Use this table for the Cupcade project (w/PiTFT).
+	// To compile, type:    make clean; make CFLAGS=-DCUPCADE
 	{  2,      KEY_LEFT     }, // Joystick (4 pins)
 	{  3,      KEY_RIGHT    },
 	{  4,      KEY_DOWN     },
@@ -123,7 +123,7 @@ struct {
 // an exit menu or quits the current game).  The button combo is
 // configured with a bitmask corresponding to elements in the above io[]
 // array.  The default value here uses elements 6 and 7 (credit and start
-// in the Picade pinout).  If you change this, make certain it's a combo
+// in the Cupcade pinout).  If you change this, make certain it's a combo
 // that's not likely to occur during actual gameplay (i.e. avoid using
 // joystick directions or hold-for-rapid-fire buttons).
 const unsigned long vulcanMask = (1L << 6) | (1L << 7);

@@ -2,11 +2,11 @@
 ADAFRUIT MENU UTILITY FOR MAME: provides a basic game selection interface
 for advmame (or possibly other MAME variants).
 
-If the file ~/.advance/advmame.xml exists, games will have 'human readable'
+If the file [base path]/advmame.xml exists, games will have 'human readable'
 titles.  Otherwise the (sometimes cryptic) ROM filename will be used.  Use
 the following command to generate the XML file:
 
-    advmame -listxml > ~/.advance/advmame.xml
+    advmame -listxml > /boot/advmame/advmame.xml
 
 MAME -must- be configured with 'z' and 'x' as buttons 1 & 2 (normally left
 ctrl and alt) for a seamless retrogame/menu/advmame experience.  This is
@@ -31,7 +31,7 @@ code, please support Adafruit and open-source hardware by purchasing
 products from Adafruit!
 
 
-Copyright (c) 2013 Adafruit Industries.
+Copyright (c) 2014 Adafruit Industries.
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -67,10 +67,12 @@ POSSIBILITY OF SUCH DAMAGE.
 
 // START HERE: configurable stuff ----------------------------------------
 
-// Change to "FRAMEBUFFER=/dev/fb1 advmame" if FRAMEBUFFER not set globally
-static const char mameCmd[] = "advmame",
-                  romPath[] = "/home/pi/.advance/rom",
-                  xmlFile[] = "/home/pi/.advance/advmame.xml";
+static const char mameCmd[]  = "advmame",
+                  basePath[] = "/boot/advmame",
+                  cfgTall[]  = "advmame.rc.portrait",
+                  cfgWide[]  = "advmame.rc.landscape",
+                  romPath[]  = "rom",
+                  xmlFile[]  = "advmame.xml";
 
 
 // A few globals ---------------------------------------------------------
@@ -91,6 +93,9 @@ WINDOW *mainWin  = NULL, // ncurses elements
        *noRomWin = NULL;
 MENU   *menu     = NULL;
 ITEM  **items    = NULL;
+
+static char *xml, // Absolute path to XML file
+            *rom; // Absolute path to ROM folder
 
 
 // Some utility functions ------------------------------------------------
@@ -202,10 +207,9 @@ static void find_roms(void) {
 	}
 
 	i = 0; // Count number of games found & successfully alloc'd
-	// scandir() returns a nicely sorted dirent array
-	if((nFiles = scandir(romPath, &dirList, sel, alphasort)) > 0) {
+	if((nFiles = scandir(rom, &dirList, sel, alphasort)) > 0) {
 		// Copy dirent array to a Game linked list
-		while(nFiles--) { // Linked list is assembled in reverse
+		while(nFiles--) { // List is assembled in reverse
 			if((g = (Game *)malloc(sizeof(Game)))) {
 				g->name  = strdup(dirList[nFiles]->d_name);
 				g->desc  = NULL;
@@ -220,7 +224,7 @@ static void find_roms(void) {
 	}
 
 	// Alloc, load, cross-reference XML file against ROM filenames
-	if((fp = fopen(xmlFile, "r"))) {
+	if((fp = fopen(xml, "r"))) {
 		fseek(fp, 0, SEEK_END);
 		char *buf;
 		int   len = ftell(fp);
@@ -266,28 +270,69 @@ static void find_roms(void) {
 	}
 }
 
+// Get full path to file/directory (relative to baseName, unless item
+// specifies absolute path).  Returns NULL on malloc error.  Return path
+// *may* be same as item (if it's absolute), or a malloc'd buffer (if
+// full path was constructed).
+char *fullPath(const char *item) {
+	char *ptr;
+
+	if(item[0] == '/') return (char *)item;
+	if((ptr = (char *)malloc(strlen(basePath) + strlen(item) + 2)))
+		(void)sprintf(ptr, "%s/%s", basePath, item);
+
+	return ptr;
+}
+
 
 // Main stuff ------------------------------------------------------------
 
-int main(void) {
+int main(int argc, char *argv[]) {
 
-	Game *g;
+	const char title[] = "MAME YOUR POISON:";
+	char       *cfg    = NULL;
+	const char *c;
+	Game       *g;
 
-	initscr();       // ncurses setup
+	if((NULL == (rom = fullPath(romPath))) ||
+	   (NULL == (xml = fullPath(xmlFile)))) {
+		(void)printf("%s: malloc() fail (rom/xml)\n", argv[0]);
+		return 1;
+	}
+
+	// ncurses setup
+	initscr();
 	cbreak();
 	noecho();
 	set_escdelay(0);
 	curs_set(0);
 
-	const char title[] = "MAME YOUR POISON:";
+	// Determine if screen is in portrait or landscape mode,
+	// get path to corresponding advmame config file.
+	// The portrait/landscape detection is far from bulletproof.
+	// Comparing COLS/LINES against each other is inadequate as
+	// the console font might not be square, so currently this just
+	// gauges COLS, which assumes use of the Terminus 6x12 font.
+	// Could read FONTSIZE value from etc/default/console-setup,
+	// but this file and value aren't guaranteed to exist.
+	// Could read the rotate value from etc/modprobe.d/adafruit.conf,
+	// but again...just...blargh, nothing's guaranteed.
+	c   = (COLS > 40) ? cfgWide : cfgTall;
+	if(NULL == (cfg = fullPath(c))) {
+		clear();
+		refresh();
+		endwin();
+		(void)printf("%s: malloc() fail (cfg)\n", argv[0]);
+		return 1;
+	}
+
 	mvprintw(0, (COLS - strlen(title)) / 2, title);
-	mvprintw(LINES-3, 0     , "Up/Down: Choose");
-	mvprintw(LINES-2, 0     , "Enter  : Run game");
-	mvprintw(LINES-3, COLS/2, "R  : Rescan ROMs");
-	mvprintw(LINES-2, COLS/2, "Q  : Quit");
+	mvprintw(LINES-2, 0     , "Up/Down: Choose");
+	mvprintw(LINES-1, 0     , "Enter  : Run game");
+	mvprintw(LINES-2, COLS/2, "R  : Rescan ROMs");
 	mvprintw(LINES-1, COLS/2, geteuid() ? "Esc: Quit" : "Esc: Shutdown");
 
-	mainWin = newwin(LINES-4, COLS, 1, 0);
+	mainWin = newwin(LINES-3, COLS, 1, 0);
 	keypad(mainWin, TRUE);
 	box(mainWin, 0, 0);
 
@@ -313,12 +358,7 @@ int main(void) {
 		   case 'r': // Re-scan ROM folder
 			find_roms();
 			break;
-		   case 'q': // Quit (to console - no shutdown)
-			clear();
-			refresh();
-			endwin();
-			return 0;
-		   case 27: // Esc = quit via shutdown (if root)
+		   case 27: // Esc = shutdown (if run as root) or quit
 			clear();
 			refresh();
 			endwin();
@@ -330,8 +370,9 @@ int main(void) {
 		   case 'x':
 			if((g = item_userptr(current_item(menu)))) {
 				char cmdline[1024];
-				(void)sprintf(cmdline, "%s %s >/dev/null",
-				  mameCmd, g->name);
+				(void)sprintf(cmdline,
+				  "%s -cfg %s %s >/dev/null",
+				  mameCmd, cfg, g->name);
 				def_prog_mode();
 				endwin();
 				system(cmdline);
@@ -344,3 +385,4 @@ int main(void) {
 
 	return 0;
 }
+
