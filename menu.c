@@ -315,8 +315,8 @@ int main(int argc, char *argv[]) {
 	// gauges COLS, which assumes use of the Terminus 6x12 font.
 	// Could read FONTSIZE value from etc/default/console-setup,
 	// but this file and value aren't guaranteed to exist.
-	// Could read the rotate value from etc/modprobe.d/adafruit.conf,
-	// but again...just...blargh, nothing's guaranteed.
+	// Could read the rotate value from /boot/adafruit.conf, but
+	// again...just...blargh, nothing's guaranteed.
 	c   = (COLS > 40) ? cfgWide : cfgTall;
 	if(NULL == (cfg = fullPath(c))) {
 		clear();

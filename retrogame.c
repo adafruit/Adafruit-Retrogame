@@ -97,11 +97,13 @@ struct {
 	{ 17,      KEY_UP       },
 	{ 27,      KEY_Z        }, // Fire/jump/primary
 	{ 22,      KEY_X        }, // Bomb/secondary
-	{ 23,      KEY_5        }, // Credit
-	{ 18,      KEY_1        }  // Start 1P
+	{ 23,      KEY_R        }, // Credit
+	{ 18,      KEY_Q        }  // Start 1P
 	// MAME must be configured with 'z' & 'x' as buttons 1 & 2 -
 	// this was required for the accompanying 'menu' utility to
 	// work (catching crtl/alt w/ncurses gets totally NASTY).
+	// Credit/start are likewise moved to 'r' & 'q,' reason being
+	// to play nicer with certain emulators not liking numbers.
 	// GPIO options are 'maxed out' with PiTFT + above table.
 	// If additional buttons are desired, will need to disable
 	// serial console and/or use P5 header.  Or use keyboard.
