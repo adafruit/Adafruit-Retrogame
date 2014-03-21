@@ -334,8 +334,7 @@ int main(int argc, char *argv[]) {
 	find_roms();
 
 	for(;;) {
-		int ch = wgetch(mainWin);
-		switch(ch) {
+		switch(wgetch(mainWin)) {
 		   case KEY_DOWN:
 			menu_driver(menu, REQ_DOWN_ITEM);
 			break;
@@ -371,13 +370,18 @@ int main(int argc, char *argv[]) {
 		   case 'x':
 			if((g = item_userptr(current_item(menu)))) {
 				char cmdline[1024];
-				(void)sprintf(cmdline,
-				  "%s -cfg %s %s >/dev/null",
+				int  i;
+				(void)sprintf(cmdline, "%s -cfg %s %s",
 				  mameCmd, cfg, g->name);
 				def_prog_mode();
 				endwin();
-				system(cmdline);
+				i = system(cmdline);
 				reset_prog_mode();
+				if(i) { // If error message, wait for input
+					(void)printf("Press any button...");
+					fflush(stdout);
+					while(!getch());
+				}
 			}
 			break;
 		}
@@ -386,5 +390,4 @@ int main(int argc, char *argv[]) {
 
 	return 0;
 }
-
 
