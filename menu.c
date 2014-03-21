@@ -353,11 +353,15 @@ int main(int argc, char *argv[]) {
 			break;
 		   case 'R': // Rotate-and-reboot
 			if(!geteuid()) { // Must be root
+				clear();
+				refresh();
 				endwin();
 				system("sed -i 's/rotate=90/foo/;s/rotate=0/rotate=90/;s/foo/rotate=0/' /etc/modprobe.d/adafruit.conf; reboot");
 			}
 			break;
 		   case 27: // Esc = shutdown (if run as root) or quit
+			clear();
+			refresh();
 			endwin();
 			if(geteuid()) return 0; // Not root, quit to console
 			(void)system("shutdown -h now");
