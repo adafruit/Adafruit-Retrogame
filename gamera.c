@@ -1,5 +1,5 @@
 /*
-ADAFRUIT MENU UTILITY FOR MAME: provides a basic game selection interface
+gamera (Game Rom Aggregator): provides a basic game selection interface
 for advmame (or possibly other MAME variants).
 
 If the file [base path]/advmame.xml exists, games will have 'human readable'
@@ -72,7 +72,8 @@ static const char mameCmd[]  = "advmame",
                   cfgTall[]  = "advmame.rc.portrait",
                   cfgWide[]  = "advmame.rc.landscape",
                   romPath[]  = "rom",
-                  xmlFile[]  = "advmame.xml";
+                  xmlFile[]  = "advmame.xml",
+                  tftFile[]  = "/etc/modprobe.d/adafruit.conf";
 
 
 // A few globals ---------------------------------------------------------
@@ -290,7 +291,7 @@ char *fullPath(const char *item) {
 int main(int argc, char *argv[]) {
 
 	const char title[] = "MAME YOUR POISON:";
-	char       *cfg    = NULL;
+	char       *cfg    = NULL, cmdline[1024];
 	const char *c;
 	Game       *g;
 
@@ -309,10 +310,10 @@ int main(int argc, char *argv[]) {
 
 	// Determine if screen is in portrait or landscape mode, get
 	// path to corresponding advmame config file.  Method is to
-	// check for 'rotate=0' in module config file.  If it's present
+	// check for 'rotate=0' in TFT module config file.  If present
 	// (system() returns 0), is portrait screen, else landscape.
-	c = system("grep rotate=0 /etc/modprobe.d/adafruit.conf") ?
-	    cfgWide : cfgTall;
+	(void)sprintf(cmdline, "grep rotate=0 %s", tftFile);
+	c = system(cmdline) ? cfgWide : cfgTall;
 	if(NULL == (cfg = fullPath(c))) {
 		endwin();
 		(void)printf("%s: malloc() fail (cfg)\n", argv[0]);
@@ -355,7 +356,12 @@ int main(int argc, char *argv[]) {
 				clear();
 				refresh();
 				endwin();
-				system("sed -i 's/rotate=90/foo/;s/rotate=0/rotate=90/;s/foo/rotate=0/' /etc/modprobe.d/adafruit.conf; reboot");
+				(void)sprintf(cmdline, 
+				  "sed -i 's/rotate=90/Fo0BaR/;"
+				          "s/rotate=0/rotate=90/;"
+				          "s/Fo0BaR/rotate=0/' %s; reboot",
+				  tftFile);
+				system(cmdline);
 			}
 			break;
 		   case 27: // Esc = shutdown (if run as root) or quit
@@ -369,7 +375,6 @@ int main(int argc, char *argv[]) {
 		   case 'z':
 		   case 'x':
 			if((g = item_userptr(current_item(menu)))) {
-				char cmdline[1024];
 				int  i;
 				(void)sprintf(cmdline, "%s -cfg %s %s",
 				  mameCmd, cfg, g->name);
