@@ -67,13 +67,24 @@ POSSIBILITY OF SUCH DAMAGE.
 
 // START HERE: configurable stuff ----------------------------------------
 
-static const char mameCmd[]  = "advmame",
-                  basePath[] = "/boot/advmame",
-                  cfgTall[]  = "advmame.rc.portrait",
-                  cfgWide[]  = "advmame.rc.landscape",
-                  romPath[]  = "rom",
-                  xmlFile[]  = "advmame.xml",
-                  tftFile[]  = "/etc/modprobe.d/adafruit.conf";
+static const char
+  mameCmd[]  = "advmame",              // Advance MAME executable
+  basePath[] = "/boot/advmame",        // Path to advmame configs & ROM dir
+  cfgTall[]  = "advmame.rc.portrait",  // Config for vertical screen
+  cfgWide[]  = "advmame.rc.landscape", // Config for horizontal screen
+  romPath[]  = "rom",                  // Subdirectory for ROMs
+  xmlFile[]  = "advmame.xml";          // Name of game list file
+
+// TFT rotation setting may be stored in different places depending
+// on kernel vs. module usage.  Rather than require configuration or
+// recompilation, this table lists all the likely culprits...
+static const struct {
+  const char *filename; // Name of config file
+  const char *keyword;  // Rotation setting string
+} tftCfg[] = {
+  { "/boot/cmdline.txt"            , "fbtft_device.rotate" },
+  { "/etc/modprobe.d/adafruit.conf", "rotate"              } };
+#define N_TFT_FILES (sizeof(tftCfg) / sizeof(tftCfg[0]))
 
 
 // A few globals ---------------------------------------------------------
@@ -290,10 +301,11 @@ char *fullPath(const char *item) {
 
 int main(int argc, char *argv[]) {
 
-	const char title[] = "MAME YOUR POISON:";
-	char       *cfg    = NULL, cmdline[1024];
+	const char  title[] = "MAME YOUR POISON:";
+	char       *cfg     = NULL, cmdline[1024];
 	const char *c;
 	Game       *g;
+	int         i;
 
 	if((NULL == (rom = fullPath(romPath))) ||
 	   (NULL == (xml = fullPath(xmlFile)))) {
@@ -312,8 +324,15 @@ int main(int argc, char *argv[]) {
 	// path to corresponding advmame config file.  Method is to
 	// check for 'rotate=0' in TFT module config file.  If present
 	// (system() returns 0), is portrait screen, else landscape.
-	(void)sprintf(cmdline, "grep rotate=0 %s", tftFile);
-	c = system(cmdline) ? cfgWide : cfgTall;
+	c = cfgWide; // Assume landscape screen to start
+	for(i=0; i<N_TFT_FILES; i++) { // Check each TFT config location...
+		(void)sprintf(cmdline, "grep %s=0 %s",
+		  tftCfg[i].keyword, tftCfg[i].filename);
+		if(!system(cmdline)) { // Found portrait reference!
+			c = cfgTall;
+			break;
+		}
+	}
 	if(NULL == (cfg = fullPath(c))) {
 		endwin();
 		(void)printf("%s: malloc() fail (cfg)\n", argv[0]);
@@ -356,12 +375,17 @@ int main(int argc, char *argv[]) {
 				clear();
 				refresh();
 				endwin();
-				(void)sprintf(cmdline, 
-				  "sed -i 's/rotate=90/Fo0BaR/;"
-				          "s/rotate=0/rotate=90/;"
-				          "s/Fo0BaR/rotate=0/' %s; reboot",
-				  tftFile);
-				system(cmdline);
+				for(i=0; i<N_TFT_FILES; i++) {
+					(void)sprintf(cmdline, 
+					  "sed -i 's/%s=90/Fo0BaR/;"
+						  "s/%s=0/%s=90/;"
+						  "s/Fo0BaR/%s=0/' %s",
+					  tftCfg[i].keyword, tftCfg[i].keyword, 
+					  tftCfg[i].keyword, tftCfg[i].keyword, 
+					  tftCfg[i].filename);
+					(void)system(cmdline);
+				}
+				(void)system("reboot");
 			}
 			break;
 		   case 27: // Esc = shutdown (if run as root) or quit
@@ -375,7 +399,6 @@ int main(int argc, char *argv[]) {
 		   case 'z':
 		   case 'x':
 			if((g = item_userptr(current_item(menu)))) {
-				int  i;
 				(void)sprintf(cmdline, "%s -cfg %s %s",
 				  mameCmd, cfg, g->name);
 				def_prog_mode();
