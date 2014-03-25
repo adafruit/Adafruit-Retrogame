@@ -12,7 +12,7 @@ gamera: gamera.c
 	strip $@
 
 install:
-	cp $(EXECS) /usr/local/bin
+	mv $(EXECS) /usr/local/bin
 
 clean:
 	rm -f $(EXECS)

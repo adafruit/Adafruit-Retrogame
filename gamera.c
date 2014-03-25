@@ -82,8 +82,8 @@ static const struct {
   const char *filename; // Name of config file
   const char *keyword;  // Rotation setting string
 } tftCfg[] = {
-  { "/boot/cmdline.txt"            , "fbtft_device.rotate" },
-  { "/etc/modprobe.d/adafruit.conf", "rotate"              } };
+  { "/etc/modprobe.d/adafruit.conf", "rotate"              },
+  { "/boot/cmdline.txt"            , "fbtft_device.rotate" } };
 #define N_TFT_FILES (sizeof(tftCfg) / sizeof(tftCfg[0]))
 
 
