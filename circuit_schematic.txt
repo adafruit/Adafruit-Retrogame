@@ -1,0 +1,21 @@
+                  MCP23017 chip (MCP)                          Raspberry GPIO (RASPY)
+                   ____________                                        ______    
+                  |            |                                      |      |
+ (Button LEFT P2)-| GPB0  GPA7 |-(Button 4 P1)        (MCP VDD,RESET)-| O  O |
+ (Button DOWN P2)-| GPB1  GPA6 |-(Button 3 P1)              (MCP SDA)-| O  O |
+(Button RIGHT P2)-| GPB2  GPA5 |-(Button 2 P1)              (MCP SDA)-| O  O |
+   (Button UP P2)-| GPB3  GPA4 |-(Button 1 P1)                        | O  O |
+    (Button 1 P2)-| GPB4  GPA3 |-(Button UP P1)                       | O  O |
+    (Button 2 P2)-| GPB5  GPA2 |-(Button RIGHT P1)         (BUTTON 1)-| O  O |
+    (Button 3 P2)-| GPB6  GPA1 |-(Button DOWN P1)          (BUTTON 2)-| O  O |
+    (Button 4 P2)-| GPB7  GPA0 |-(Button LEFT P1)          (BUTTON 6)-| O  O |-(MCP INTA)
+    (RASPY +3.3V)-| VDD   INTA |-(RASPY GPIO23)                       | O  O |-(MCP INTB)
+   (RASPY GROUND)-| VSS   INTB |-(RASPY GPIO18)      (BUTTON P=PAUSE)-| O  O |
+                 -| NC   RESET |-(RASPY +3.3V)                        | O  O |
+      (RASPY SCL)-| SCL     A2 |-(RASPY GROUND)                       | O  O |-(BUTTON ESC)
+      (RASPY SDA)-| SDA     A1 |-(RASPY GROUND)    (MCP VSS,A2,A1,A0)-| O  O |-(BUTTON 5)
+                 -| NC      A0 |-(RASPY GROUND)                       |______|
+                  |____________|                                        
+                                       
+      
+    
