@@ -1,5 +1,5 @@
 /*
-ADAFRUIT RETROGAME UTILITY: remaps buttons on Raspberry Pi GPIO header
+ADAFRUIT RETROGAME UTILITY: remaps buttons on Raspberry Pi GPIO header 
 to virtual USB keyboard presses.  Great for classic game emulators!
 Retrogame is interrupt-driven and efficient (usually under 0.3% CPU use)
 and debounces inputs for glitch-free gaming.
