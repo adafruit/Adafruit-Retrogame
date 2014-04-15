@@ -3,7 +3,7 @@
                   |            |                                      |      |
  (Button LEFT P2)-| GPB0  GPA7 |-(Button 4 P1)        (MCP VDD,RESET)-| O  O |
  (Button DOWN P2)-| GPB1  GPA6 |-(Button 3 P1)              (MCP SDA)-| O  O |
-(Button RIGHT P2)-| GPB2  GPA5 |-(Button 2 P1)              (MCP SDA)-| O  O |
+(Button RIGHT P2)-| GPB2  GPA5 |-(Button 2 P1)              (MCP SCL)-| O  O |
    (Button UP P2)-| GPB3  GPA4 |-(Button 1 P1)                        | O  O |
     (Button 1 P2)-| GPB4  GPA3 |-(Button UP P1)                       | O  O |
     (Button 2 P2)-| GPB5  GPA2 |-(Button RIGHT P1)         (BUTTON 1)-| O  O |
