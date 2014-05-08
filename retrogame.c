@@ -128,9 +128,14 @@ struct {
 // in the Cupcade pinout).  If you change this, make certain it's a combo
 // that's not likely to occur during actual gameplay (i.e. avoid using
 // joystick directions or hold-for-rapid-fire buttons).
+// Also key auto-repeat times are set here.  This is for navigating the
+// game menu using the 'gamera' utility; MAME disregards key repeat
+// events (as it should).
 const unsigned long vulcanMask = (1L << 6) | (1L << 7);
 const int           vulcanKey  = KEY_ESC, // Keycode to send
-                    vulcanTime = 1500;    // Pinch time in milliseconds
+                    vulcanTime = 1500,    // Pinch time in milliseconds
+                    repTime1   = 500,     // Key hold time to begin repeat
+                    repTime2   = 100;     // Time between key repetitions
 
 
 // A few globals ---------------------------------------------------------
@@ -213,7 +218,8 @@ int main(int argc, char *argv[]) {
 	                       bitmask,         // Pullup enable bitmask
 	                       timeout = -1,    // poll() timeout
 	                       intstate[IOLEN], // Last-read state
-	                       extstate[IOLEN]; // Debounced state
+	                       extstate[IOLEN], // Debounced state
+	                       lastKey = -1;    // Last key down (for repeat)
 	unsigned long          bitMask, bit;    // For Vulcan pinch detect
 	volatile unsigned char shortWait;       // Delay counter
 	struct uinput_user_dev uidev;           // uinput device
@@ -357,6 +363,7 @@ int main(int argc, char *argv[]) {
 				}
 			}
 			timeout = debounceTime; // Set timeout for debounce
+			c       = 0;            // Don't issue SYN event
 			// Else timeout occurred
 		} else if(timeout == debounceTime) { // Button debounce timeout
 			// 'j' (number of non-GNDs) is re-counted as
@@ -376,24 +383,32 @@ int main(int argc, char *argv[]) {
 						write(fd, &keyEv,
 						  sizeof(keyEv));
 						c = 1; // Follow w/SYN event
+						if(intstate[j]) { // Press?
+							// Note pressed key
+							// and set initial
+							// repeat interval.
+							lastKey = i;
+							timeout = repTime1;
+						} else { // Release?
+							// Stop repeat and
+							// return to normal
+							// IRQ monitoring
+							// (no timeout).
+							lastKey = timeout = -1;
+						}
 					}
 					j++;
 					if(intstate[i]) bitMask |= bit;
 				}
 			}
-			if(c) write(fd, &synEv, sizeof(synEv));
 
-			// If the "Vulcan nerve pinch" buttons are currently
-			// pressed, set long timeout -- if this time elapses
-			// without a button state change, an esc keypress
-			// will be sent.  Or, if not currently pressed,
-			// return to normal IRQ monitoring (no timeout).
-			timeout = ((bitMask & vulcanMask) == vulcanMask) ?
-			  vulcanTime : -1;
-		} else if(timeout != -1) { // Vulcan timeout occurred
-#if 0 // Old behavior did a shutdown
-			(void)system("shutdown -h now");
-#else // Send keycode instead (MAME exits or displays exit menu)
+			// If the "Vulcan nerve pinch" buttons are pressed,
+			// set long timeout -- if this time elapses without
+			// a button state change, esc keypress will be sent.
+			if((bitMask & vulcanMask) == vulcanMask)
+				timeout = vulcanTime;
+		} else if(timeout == vulcanTime) { // Vulcan timeout occurred
+			// Send keycode (MAME exits or displays exit menu)
 			keyEv.code = vulcanKey;
 			for(i=1; i>= 0; i--) { // Press, release
 				keyEv.value = i;
@@ -403,8 +418,16 @@ int main(int argc, char *argv[]) {
 				usleep(10000);
 			}
 			timeout = -1; // Return to normal processing
-#endif
+			c       = 0;  // No add'l SYN required
+		} else if(lastKey >= 0) { // Else key repeat timeout
+			if(timeout == repTime1) timeout = repTime2;
+			else if(timeout > 30)   timeout -= 5; // Accelerate
+			c           = 1; // Follow w/SYN event
+			keyEv.code  = io[lastKey].key;
+			keyEv.value = 2; // Key repeat event
+			write(fd, &keyEv, sizeof(keyEv));
 		}
+		if(c) write(fd, &synEv, sizeof(synEv));
 	}
 
 	// ----------------------------------------------------------------
