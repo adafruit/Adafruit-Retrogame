@@ -1,27 +1,35 @@
 /*
-gamera (Game Rom Aggregator): provides a basic game selection interface
-for advmame (or possibly other MAME variants).
+gamera (Game Rom Aggregator): simple game selection interface for the
+advmame (arcade) and fceu (NES) emulators (maybe others in the future).
 
-If the file [base path]/advmame.xml exists, games will have 'human readable'
-titles.  Otherwise the (sometimes cryptic) ROM filename will be used.  Use
-the following command to generate the XML file:
+Data specific to each emulator are currently set in global variables near
+the top of the code.  Emulator-specific code likewise appears early.
+
+If /boot/advmame/advmame.xml exists, MAME games will have human-readable
+titles.  Otherwise the (sometimes cryptic) ROM filename is displayed.
+Use the following command to generate the XML file:
 
     advmame -listxml > /boot/advmame/advmame.xml
 
-MAME -must- be configured with 'z' and 'x' as buttons 1 & 2 (normally left
-ctrl and alt) for a seamless retrogame/menu/advmame experience.  This is
-because handling raw keycodes with ncurses is a Pandora's Box of pure evil.
+fceu does not have this option; the ROM filename is the only name displayed.
+
+advmame -must- be configured with 'z' and 'x' as the primary and secondary
+buttons, respectively (normally left ctrl and alt) for a seamless
+retrogame/gamera/advmame experience.  This is because handling raw keycodes
+with ncurses is a Pandora's Box of pure evil.  These lines should exist in
+the advmame.rc file:
 
  device_keyboard raw
  input_map[p1_button1] keyboard[0,lcontrol] or keyboard[0,z]
  input_map[p1_button2] keyboard[0,lalt] or keyboard[0,x]
  input_map[ui_select] keyboard[0,enter] or keyboard[0,lcontrol] or keyboard[0,z]
 
-The command to launch MAME, the location of the ROM folder and the (optional)
-XML file are currently all set in global variables near the top of the code.
+fceu likewise needs a configuration file with similar input mapping for
+the controls.  It's a binary file and not easily edited; a valid config
+file is included on the Cupcade disk image.
 
-The Pre-built executable should run as-is for most users.  If you need to
-tweak and recompile, this requires the ncurses and expat C libraries:
+The pre-built gamera executable should run as-is for most users.  If you
+need to tweak and recompile, it requires the ncurses and expat C libraries:
 
     sudo apt-get install ncurses-dev libexpat1-dev
 
@@ -67,57 +75,94 @@ POSSIBILITY OF SUCH DAMAGE.
 
 // START HERE: configurable stuff ----------------------------------------
 
-static const char
-  mameCmd[]  = "advmame",              // Advance MAME executable
-  basePath[] = "/boot/advmame",        // Path to advmame configs & ROM dir
-  cfgTall[]  = "advmame.rc.portrait",  // Config for vertical screen
-  cfgWide[]  = "advmame.rc.landscape", // Config for horizontal screen
-  romPath[]  = "rom",                  // Subdirectory for ROMs
-  xmlFile[]  = "advmame.xml";          // Name of game list file
-
 // TFT rotation setting may be stored in different places depending
-// on kernel vs. module usage.  Rather than require configuration or
-// recompilation, this table lists all the likely culprits...
+// on kernel vs. module usage.  This table lists all the likely culprits.
 static const struct {
-  const char *filename; // Name of config file
+  const char *filename; // Absolute path to config file
   const char *keyword;  // Rotation setting string
 } tftCfg[] = {
   { "/etc/modprobe.d/adafruit.conf", "rotate"              },
   { "/boot/cmdline.txt"            , "fbtft_device.rotate" } };
 #define N_TFT_FILES (sizeof(tftCfg) / sizeof(tftCfg[0]))
 
-
-// A few globals ---------------------------------------------------------
-
-// Linked list of Game structs is generated when scanning ROM folder
+// For each emulator, a linked list of these Game structs is generated
+// when scanning the corresponding ROM directory.
 typedef struct Game {
-	char        *name; // ROM filename (sans .zip)
-	char        *desc; // From XML - verbose title, or NULL if none
-	struct Game *next;
+  unsigned char emu;  // Index of parent emulator
+  char         *name; // ROM filename (as passed to emulator)
+  struct Game  *next; // Next game in linked list
 } Game;
 
-static Game *gameList       = NULL, // Entry to Game linked list
-            *gameToDescribe = NULL; // Used during XML cross-referencing
+// A few function prototypes needed for elements of the subsequent struct.
+// The functions themselves are described later, don't panic.
+static void
+  mameInit(void), mameCommand(Game *, char *), fceuCommand(Game *, char *);
+static int
+  mameFilter(const struct dirent *), mameItemize(Game *, int),
+  fceuFilter(const struct dirent *), fceuItemize(Game *, int);
 
-static unsigned char descFlag = 0;  // Also for XML cross-ref
+// List of supported emulators
+static struct Emulator {
+  const char *title;                           // Emulator name on menu
+  const char *romPath;                         // Absolute path to ROMs
+  Game       *gameList;                        // Linked list of Games
+  void       (*init)(void);                    // Emulator-specific setup
+  int        (*filter)(const struct dirent *); // ID ROMs for scandir()
+  int        (*itemize)(Game *, int);          // Filenames to item list
+  void       (*command)(Game *, char *);       // Prepare command line
+} emulator[] = {
+  { "MAME:", "/boot/advmame/rom", NULL,
+     mameInit, mameFilter, mameItemize, mameCommand },
+  { "NES:" , "/boot/fceu/rom"   , NULL,
+     NULL    , fceuFilter, fceuItemize, fceuCommand }
+};
+#define N_EMULATORS (sizeof(emulator) / sizeof(emulator[0]))
 
-WINDOW *mainWin  = NULL, // ncurses elements
+// A few global ncurses elements
+WINDOW *mainWin  = NULL,
        *noRomWin = NULL;
 MENU   *menu     = NULL;
 ITEM  **items    = NULL;
 
-static char *xml, // Absolute path to XML file
-            *rom; // Absolute path to ROM folder
+// MAME-specific globals and code ----------------------------------------
 
+static Game          *mameGameList   = NULL, // Used during XML
+                     *gameToDescribe = NULL; // cross-referencing.
+static unsigned char  descFlag       = 0;    // Ditto.
+static int            mameItem;              // And so forth.
+static const char
+  mameCfgTall[] = "/boot/advmame/advmame.rc.portrait",  // Absolute paths
+  mameCfgWide[] = "/boot/advmame/advmame.rc.landscape", // to config and
+  mameXmlFile[] = "/boot/advmame/advmame.xml",          // data files.
+  *mameCfg;                                             // Active config.
 
-// Some utility functions ------------------------------------------------
+static void mameInit(void) {
+	int i;
+	char cmdline[1024];
+	// Determine if screen is in portrait or landscape mode, get
+	// path to corresponding advmame config file.  Method is to
+	// check for 'rotate=0' in TFT module config file.  If present
+	// (system() returns 0), is portrait screen, else landscape.
+	mameCfg = mameCfgWide; // Assume landscape screen to start
+	for(i=0; i<N_TFT_FILES; i++) { // Check each TFT config location...
+		(void)sprintf(cmdline, "grep %s=0 %s",
+		  tftCfg[i].keyword, tftCfg[i].filename);
+		if(!system(cmdline)) { // Found portrait reference!
+			mameCfg = mameCfgTall;
+			break;
+		}
+	}
+}
 
-// Filter function for scandir().  Returns files & links ending in .zip
-static int sel(const struct dirent *d) {
+// MAME-specific filter function for scandir() -- given a dirent struct,
+// returns 1 if it's a likely ROM file candidate (ends in .zip).  The
+// .zip file extension is then stripped; not needed when invoking emulator.
+static int mameFilter(const struct dirent *d) {
 	char *ptr;
 	if(((d->d_type == DT_REG) || (d->d_type == DT_LNK)) &&
-	   (ptr = strrchr(d->d_name,'.')) && !strcasecmp(ptr,".zip")) {
-		*ptr = 0; // Truncate .zip extender
+	   (d->d_name[0] != '.') && // Ignore dotfiles
+	   (ptr = strrchr(d->d_name, '.')) && !strcasecmp(ptr, ".zip")) {
+		*ptr = 0; // Truncate .zip extension
 		return 1;
 	}
 	return 0;
@@ -131,13 +176,13 @@ static void XMLCALL startElement(
 		if(!strcmp(name, "game") && attr[0] && attr[1]) {
 			// Compare attr[1] against list of game names...
 			Game *g;
-			for(g=gameList; g && !gameToDescribe; g=g->next) {
+			for(g=mameGameList; g && !gameToDescribe; g=g->next) {
 				if(!strcmp(attr[1], g->name)) {
 					// Found match, save pointer to game
 					gameToDescribe = g;
 					// The element data parser, if
-					// subsequently enabled,  may then
-					// modify the desc for this game.
+					// subsequently enabled, may then
+					// create the desc for this game.
 				}
 			}
 		}
@@ -159,22 +204,111 @@ static void XMLCALL endElement(void *depth, const char *name) {
 static void elementData(void *data, const char *content, int length) {
 	// gameToDescribe and descFlag must both be set; avoid false positives
 	if(descFlag && gameToDescribe) {
-		// Shouldn't be multiple descriptions, but just in case...
-		if(gameToDescribe->desc) free(gameToDescribe->desc);
-		if((gameToDescribe->desc = malloc(length + 1))) {
-			strncpy(gameToDescribe->desc, content, length);
-			gameToDescribe->desc[length] = 0;
-		} // malloc() fail is non-fatal; will fall back on name alone
+		char *str;
+		if((str = strndup(content, length)) ||
+		   (str = strdup(gameToDescribe->name))) { // Name fallback
+			items[mameItem] = new_item(str, NULL); // Add to list
+			set_item_userptr(items[mameItem++], gameToDescribe);
+		}
 		descFlag = 0; // Found description, we're done
 	}
 }
 
-// Scan MAME ROMs folder, cross-reference against XML (if present) for
-// verbose descriptions, generate ncurses menu.
-static void find_roms(void) {
-	FILE           *fp;
+// After scanning folder for MAME ROM files, cross-reference XML file
+// against filenames and populate the items[] array with human-readable
+// game descriptions.  Fall back on names alone for items.
+static int mameItemize(Game *g, int i) {
+	// Alloc, load, cross-reference XML file against MAME ROM filenames
+	FILE *fp;
+
+	mameGameList = NULL; // Requires some ugly global state stuff
+	mameItem     = i;
+	if((fp = fopen(mameXmlFile, "r"))) {
+		fseek(fp, 0, SEEK_END);
+		char *buf;
+		int   len = ftell(fp);
+		if((buf = (char *)malloc(len))) {
+			int depth = 0;
+			fseek(fp, 0, SEEK_SET);
+			fread(buf, 1, len, fp);
+			mameGameList = g; // Opened & alloc'd OK
+			XML_Parser parser = XML_ParserCreate(NULL);
+			XML_SetUserData(parser, &depth);
+			XML_SetElementHandler(parser,
+			  startElement, endElement);
+			XML_SetCharacterDataHandler(parser, elementData);
+			XML_Parse(parser, buf, len, 1);
+			XML_ParserFree(parser);
+			free(buf);
+		}
+		fclose(fp);
+	}
+
+	// If the open or malloc above failed, fall back on names alone
+	if(!mameGameList) {
+		char *str;
+		for(; g; g=g->next) {
+			if((str = strdup(g->name))) {
+				items[mameItem] = new_item(str, NULL);
+				set_item_userptr(items[mameItem++], g);
+			}
+		}
+	}
+
+	return mameItem; // Return next items[] index
+}
+
+// Given a Game struct and an output buffer, format a command string
+// for invoking advmame via system()
+static void mameCommand(Game *g, char *cmdline) {
+	(void)sprintf(cmdline, "advmame -cfg %s %s", mameCfg, g->name);
+}
+
+// NES-specific globals and code -----------------------------------------
+
+// fceu-specific filter function for scandir() -- given a dirent struct,
+// returns 1 if it's a likely ROM file candidate (ends in .zip or .nes).
+static int fceuFilter(const struct dirent *d) {
+	static const char *ext[] = { "zip", "nes" };
+	char              *ptr;
+	int                i;
+
+	if(((d->d_type == DT_REG) || (d->d_type == DT_LNK)) &&
+	   (d->d_name[0] != '.') && (ptr = strrchr(d->d_name,'.'))) {
+		for(++ptr, i=0; i<sizeof(ext)/sizeof(ext[0]); i++)
+			if(!strcasecmp(ptr, ext[i])) return 1;
+	}
+	return 0;
+}
+
+// After scanning folder for NES ROM files, populate the items[] array with
+// game names with the file extension removed.
+static int fceuItemize(Game *g, int i) {
+	char *str;
+	for(; g; g=g->next) {
+		if((str = strndup(g->name, strrchr(g->name,'.') - g->name))) {
+			items[i] = new_item(str, NULL);
+			set_item_userptr(items[i++], g);
+		}
+	}
+	return i; // Return next items[] index
+}
+
+// Given a Game struct and an output buffer, format a command string
+// for invoking fceu via system()
+static void fceuCommand(Game *g, char *cmdline) {
+	(void)sprintf(cmdline, "fceu \"%s/%s\"",
+	  emulator[g->emu].romPath, g->name);
+}
+
+
+// Utility functions -----------------------------------------------------
+
+// Delete existing ROM list, scan all emulators' ROM folders, generate
+// new ROM menu for ncurses.
+int find_roms(void) {
 	struct dirent **dirList;
-	int             i, nFiles;
+	int             i, e, nFiles, nGames = 0, nEmuTitles = 0;
 	Game           *g;       // For traversing Game linked list
 	WINDOW         *scanWin; // Modal 'Scanning...' window
 
@@ -210,59 +344,64 @@ static void find_roms(void) {
 	werase(mainWin);
 	box(mainWin, 0, 0);
 
-	while(gameList) { // Delete existing gameList, if any
-		g = gameList->next;
-		if(gameList->name) free(gameList->name);
-		if(gameList->desc) free(gameList->desc);
-		free(gameList);
-		gameList = g;
-	}
+	for(e=0; e<N_EMULATORS; e++) { // For each emulator...
 
-	i = 0; // Count number of games found & successfully alloc'd
-	if((nFiles = scandir(rom, &dirList, sel, alphasort)) > 0) {
-		// Copy dirent array to a Game linked list
-		while(nFiles--) { // List is assembled in reverse
-			if((g = (Game *)malloc(sizeof(Game)))) {
-				g->name  = strdup(dirList[nFiles]->d_name);
-				g->desc  = NULL;
-				g->next  = gameList;
-				gameList = g;
-				i++; // A winner is you
+		// Delete existing gameList, if any
+		while(emulator[e].gameList) {
+			g = emulator[e].gameList->next;
+			if(emulator[e].gameList->name)
+				free(emulator[e].gameList->name);
+			free(emulator[e].gameList);
+			emulator[e].gameList = g;
+		}
+
+		// Scan ROM folder, build new gameList
+		if((nFiles = scandir(emulator[e].romPath, &dirList,
+		  emulator[e].filter, alphasort)) > 0) {
+			nEmuTitles++;
+			// Copy dirent array to a Game linked list.
+			while(nFiles--) { // Assembled in reverse
+				if((g = (Game *)malloc(sizeof(Game)))) {
+					if((g->name = strdup(
+					  dirList[nFiles]->d_name))) {
+						g->emu  = e;
+						g->next = emulator[e].gameList;
+						emulator[e].gameList = g;
+						nGames++; // A winner is you
+					} else {
+						free(g);
+					}
+				}
+				// dirList contents are freed as we go
+				free(dirList[nFiles]);
 			}
-			// dirList contents are freed as we go
-			free(dirList[nFiles]);
+			free(dirList);
 		}
-		free(dirList);
 	}
 
-	// Alloc, load, cross-reference XML file against ROM filenames
-	if((fp = fopen(xml, "r"))) {
-		fseek(fp, 0, SEEK_END);
-		char *buf;
-		int   len = ftell(fp);
-		if((buf = (char *)malloc(len))) {
-			int depth = 0;
-			fseek(fp, 0, SEEK_SET);
-			fread(buf, 1, len, fp);
-			XML_Parser parser = XML_ParserCreate(NULL);
-			XML_SetUserData(parser, &depth);
-			XML_SetElementHandler(parser,
-			  startElement, endElement);
-			XML_SetCharacterDataHandler(parser, elementData);
-			XML_Parse(parser, buf, len, 1);
-			XML_ParserFree(parser);
-			free(buf);
-		}
-		fclose(fp);
-	}
+	// nGames is the total number of game files found.  nEmuTitles
+	// is the number of emulators for which games were found (ones
+	// without games aren't listed in menu).  If only one emulator
+	// is active, set to 0 to convey that no title is needed.
+	if(nEmuTitles == 1) nEmuTitles = 0;
 
-	if((items = (ITEM**)malloc((i + 1) * sizeof(ITEM *)))) {
-		for(i=0, g=gameList; g; g=g->next, i++) {
-			items[i] = new_item(g->name, g->desc);
-			set_item_userptr(items[i], g);
+	if(nGames &&
+	  (items = (ITEM**)malloc((nGames+nEmuTitles+1) * sizeof(ITEM *)))) {
+		i = 0;
+		for(e=0; e<N_EMULATORS; e++) {
+			if(nEmuTitles) {
+				// Add non-selectable emulator title
+				items[i] = new_item(emulator[e].title, NULL);
+				item_opts_off(items[i++], O_SELECTABLE);
+			}
+			if(emulator[e].gameList) {
+				// Add games to items[] list
+				i = emulator[e].itemize(
+				  emulator[e].gameList, i);
+			}
 		}
 		items[i] = NULL;
-		menu = new_menu(items);
+		menu     = new_menu(items);
 		set_menu_win(menu, mainWin);
 		set_menu_sub(menu, derwin(mainWin, LINES-6, COLS-2, 1, 1));
 		set_menu_format(menu, LINES-6, 1);
@@ -280,20 +419,8 @@ static void find_roms(void) {
 		mvwprintw(noRomWin, 1, 2, noRomMsg);
 		wrefresh(noRomWin);
 	}
-}
 
-// Get full path to file/directory (relative to baseName, unless item
-// specifies absolute path).  Returns NULL on malloc error.  Return path
-// *may* be same as item (if it's absolute), or a malloc'd buffer (if
-// full path was constructed).
-char *fullPath(const char *item) {
-	char *ptr;
-
-	if(item[0] == '/') return (char *)item;
-	if((ptr = (char *)malloc(strlen(basePath) + strlen(item) + 2)))
-		(void)sprintf(ptr, "%s/%s", basePath, item);
-
-	return ptr;
+	return nEmuTitles;
 }
 
 
@@ -301,17 +428,10 @@ char *fullPath(const char *item) {
 
 int main(int argc, char *argv[]) {
 
-	const char  title[] = "MAME YOUR POISON:";
-	char       *cfg     = NULL, cmdline[1024];
-	const char *c;
+	const char  title[] = "Game ROM Aggregator (GAMERA)";
+	char        cmdline[1024];
 	Game       *g;
 	int         i;
-
-	if((NULL == (rom = fullPath(romPath))) ||
-	   (NULL == (xml = fullPath(xmlFile)))) {
-		(void)printf("%s: malloc() fail (rom/xml)\n", argv[0]);
-		return 1;
-	}
 
 	// ncurses setup
 	initscr();
@@ -320,24 +440,7 @@ int main(int argc, char *argv[]) {
 	set_escdelay(0);
 	curs_set(0);
 
-	// Determine if screen is in portrait or landscape mode, get
-	// path to corresponding advmame config file.  Method is to
-	// check for 'rotate=0' in TFT module config file.  If present
-	// (system() returns 0), is portrait screen, else landscape.
-	c = cfgWide; // Assume landscape screen to start
-	for(i=0; i<N_TFT_FILES; i++) { // Check each TFT config location...
-		(void)sprintf(cmdline, "grep %s=0 %s",
-		  tftCfg[i].keyword, tftCfg[i].filename);
-		if(!system(cmdline)) { // Found portrait reference!
-			c = cfgTall;
-			break;
-		}
-	}
-	if(NULL == (cfg = fullPath(c))) {
-		endwin();
-		(void)printf("%s: malloc() fail (cfg)\n", argv[0]);
-		return 1;
-	}
+	for(i=0; i<N_EMULATORS; i++) if(emulator[i].init) (*emulator[i].init)();
 
 	mvprintw(0, (COLS - strlen(title)) / 2, title);
 	mvprintw(LINES-2, 0     , "Up/Down: Choose");
@@ -351,15 +454,23 @@ int main(int argc, char *argv[]) {
 
 	refresh();
 
-	find_roms();
+	// Scan emulator ROM folders and load items[] list.  If more than
+	// one emulator is active (find_roms() > 0), move the default
+	// selection down one item -- the first is an emulator name, not
+	// a game title.
+	if(find_roms()) menu_driver(menu, REQ_DOWN_ITEM);
 
 	for(;;) {
 		switch(wgetch(mainWin)) {
 		   case KEY_DOWN:
 			menu_driver(menu, REQ_DOWN_ITEM);
+			if(!item_userptr(current_item(menu)))     // Emu name
+				menu_driver(menu, REQ_DOWN_ITEM); // Skip
 			break;
 		   case KEY_UP:
 			menu_driver(menu, REQ_UP_ITEM);
+			if(!item_userptr(current_item(menu)))
+				menu_driver(menu, REQ_UP_ITEM);
 			break;
 		   case KEY_NPAGE:
 			menu_driver(menu, REQ_SCR_DPAGE);
@@ -368,7 +479,7 @@ int main(int argc, char *argv[]) {
 			menu_driver(menu, REQ_SCR_UPAGE);
 			break;
 		   case 'r': // Re-scan ROM folder
-			find_roms();
+			if(find_roms()) menu_driver(menu, REQ_DOWN_ITEM);
 			break;
 		   case 'R': // Rotate-and-reboot
 			if(!geteuid()) { // Must be root
@@ -399,8 +510,7 @@ int main(int argc, char *argv[]) {
 		   case 'z':
 		   case 'x':
 			if((g = item_userptr(current_item(menu)))) {
-				(void)sprintf(cmdline, "%s -cfg %s %s",
-				  mameCmd, cfg, g->name);
+				(*emulator[g->emu].command)(g, cmdline);
 				def_prog_mode();
 				endwin();
 				i = system(cmdline);
