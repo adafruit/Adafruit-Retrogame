@@ -6,7 +6,7 @@ Data specific to each emulator are currently set in global variables near
 the top of the code.  Emulator-specific code likewise appears early.
 
 If /boot/advmame/advmame.xml exists, MAME games will have human-readable
-titles.  Otherwise the (sometimes cryptic) ROM filename is displayed.
+titles.  Otherwise the ROM filename (sometimes cryptic) is displayed.
 Use the following command to generate the XML file:
 
     advmame -listxml > /boot/advmame/advmame.xml
@@ -89,7 +89,7 @@ static const struct {
 // when scanning the corresponding ROM directory.
 typedef struct Game {
   unsigned char emu;  // Index of parent emulator
-  char         *name; // ROM filename (as passed to emulator)
+  char         *name; // ROM name (as passed to emulator; may be sans .zip)
   struct Game  *next; // Next game in linked list
 } Game;
 
@@ -108,13 +108,14 @@ static struct Emulator {
   Game       *gameList;                        // Linked list of Games
   void       (*init)(void);                    // Emulator-specific setup
   int        (*filter)(const struct dirent *); // ID ROMs for scandir()
+  int        (*compar)(const struct dirent **, const struct dirent**);
   int        (*itemize)(Game *, int);          // Filenames to item list
   void       (*command)(Game *, char *);       // Prepare command line
 } emulator[] = {
   { "MAME:", "/boot/advmame/rom", NULL,
-     mameInit, mameFilter, mameItemize, mameCommand },
+     mameInit, mameFilter, NULL     , mameItemize, mameCommand },
   { "NES:" , "/boot/fceu/rom"   , NULL,
-     NULL    , fceuFilter, fceuItemize, fceuCommand }
+     NULL    , fceuFilter, alphasort, fceuItemize, fceuCommand }
 };
 #define N_EMULATORS (sizeof(emulator) / sizeof(emulator[0]))
 
@@ -124,21 +125,40 @@ WINDOW *mainWin  = NULL,
 MENU   *menu     = NULL;
 ITEM  **items    = NULL;
 
+
 // MAME-specific globals and code ----------------------------------------
 
-static Game          *mameGameList   = NULL, // Used during XML
-                     *gameToDescribe = NULL; // cross-referencing.
-static unsigned char  descFlag       = 0;    // Ditto.
-static int            mameItem;              // And so forth.
 static const char
   mameCfgTall[] = "/boot/advmame/advmame.rc.portrait",  // Absolute paths
   mameCfgWide[] = "/boot/advmame/advmame.rc.landscape", // to config and
   mameXmlFile[] = "/boot/advmame/advmame.xml",          // data files.
-  *mameCfg;                                             // Active config.
+ *mameCfg;                                              // Active config.
+
+// Each emulator's Games are stored in a linked list.  The titles
+// displayed for MAME are alphabetically sorted by the XML-derived title,
+// not filename.  In order to use qsort() -- which is array-oriented --
+// MAME titles are placed in an array with a pointer back to the Game
+// struct.  fceu sorts by filename during scandir(); it doesn't have
+// XML verbose titles and doesn't do this.
+typedef struct {
+  Game *g;
+  char *title;
+} mameID;
+
+mameID *mameArray;
+
+// Speaking of Pandora's Box of pure evil...XML cross-referencing (for
+// human-readable MAME titles) is a spaghetti-fest involving globals
+// for maintaining state across callbacks invoked by the expat library.
+static Game          *mameGameList   = NULL, // -> MAME game linked list
+                     *gameToDescribe = NULL; // Game being XML-parsed
+static unsigned char  descFlag       = 0;    // Enable name parser
+static int            mameIdx;               // Counter into mameArray[]
 
 static void mameInit(void) {
-	int i;
 	char cmdline[1024];
+	int  i;
+
 	// Determine if screen is in portrait or landscape mode, get
 	// path to corresponding advmame config file.  Method is to
 	// check for 'rotate=0' in TFT module config file.  If present
@@ -149,7 +169,7 @@ static void mameInit(void) {
 		  tftCfg[i].keyword, tftCfg[i].filename);
 		if(!system(cmdline)) { // Found portrait reference!
 			mameCfg = mameCfgTall;
-			break;
+			return;
 		}
 	}
 }
@@ -176,10 +196,11 @@ static void XMLCALL startElement(
 		if(!strcmp(name, "game") && attr[0] && attr[1]) {
 			// Compare attr[1] against list of game names...
 			Game *g;
-			for(g=mameGameList; g && !gameToDescribe; g=g->next) {
+			for(mameIdx=0,g=mameGameList;g;g=g->next,mameIdx++) {
 				if(!strcmp(attr[1], g->name)) {
 					// Found match, save pointer to game
 					gameToDescribe = g;
+					break;
 					// The element data parser, if
 					// subsequently enabled, may then
 					// create the desc for this game.
@@ -204,25 +225,35 @@ static void XMLCALL endElement(void *depth, const char *name) {
 static void elementData(void *data, const char *content, int length) {
 	// gameToDescribe and descFlag must both be set; avoid false positives
 	if(descFlag && gameToDescribe) {
-		char *str;
-		if((str = strndup(content, length)) ||
-		   (str = strdup(gameToDescribe->name))) { // Name fallback
-			items[mameItem] = new_item(str, NULL); // Add to list
-			set_item_userptr(items[mameItem++], gameToDescribe);
-		}
+		if(mameArray && (!mameArray[mameIdx].title))
+			mameArray[mameIdx].title = strndup(content, length);
 		descFlag = 0; // Found description, we're done
 	}
+}
+
+// Compare function for qsort() -- for alphabetizing MAME game list
+static int mameCompare(const void *a, const void *b) {
+	return strcasecmp(((mameID *)a)->title, ((mameID *)b)->title);
 }
 
 // After scanning folder for MAME ROM files, cross-reference XML file
 // against filenames and populate the items[] array with human-readable
 // game descriptions.  Fall back on names alone for items.
-static int mameItemize(Game *g, int i) {
-	// Alloc, load, cross-reference XML file against MAME ROM filenames
+static int mameItemize(Game *gList, int i) {
 	FILE *fp;
+	Game *g;
+	int   gCount;
 
-	mameGameList = NULL; // Requires some ugly global state stuff
-	mameItem     = i;
+	// Count number of games, alloc and init array of mameIDs.
+	for(gCount=0, g=gList; g; g=g->next, gCount++);
+	if((mameArray = (mameID *)malloc(gCount * sizeof(mameID)))) {
+		for(gCount=0, g=gList; g; g=g->next, gCount++) {
+			mameArray[gCount].g     = g;
+			mameArray[gCount].title = NULL;
+		}
+	}
+
+	mameGameList = NULL; // -> MAME linked list doubles as success flag
 	if((fp = fopen(mameXmlFile, "r"))) {
 		fseek(fp, 0, SEEK_END);
 		char *buf;
@@ -231,7 +262,7 @@ static int mameItemize(Game *g, int i) {
 			int depth = 0;
 			fseek(fp, 0, SEEK_SET);
 			fread(buf, 1, len, fp);
-			mameGameList = g; // Opened & alloc'd OK
+			mameGameList = gList; // Opened & alloc'd OK
 			XML_Parser parser = XML_ParserCreate(NULL);
 			XML_SetUserData(parser, &depth);
 			XML_SetElementHandler(parser,
@@ -244,18 +275,38 @@ static int mameItemize(Game *g, int i) {
 		fclose(fp);
 	}
 
-	// If the open or malloc above failed, fall back on names alone
-	if(!mameGameList) {
-		char *str;
-		for(; g; g=g->next) {
-			if((str = strdup(g->name))) {
-				items[mameItem] = new_item(str, NULL);
-				set_item_userptr(items[mameItem++], g);
+	// Make a second pass through games list...
+	if((mameArray)) {
+
+		// For any games that are unlabeled (either due to above
+		// open or malloc failing, or a game simply not being
+		// located in the XML file), fall back on filename alone.
+		for(gCount=0, g=gList; g; g=g->next, gCount++) {
+			if(!mameArray[gCount].title) {
+				mameArray[gCount].title = strdup(g->name);
 			}
 		}
+		// Alphabetize MAME game list...
+		qsort(mameArray, gCount, sizeof(mameID), mameCompare);
+		// And populate menu...
+		for(gCount=0, g=gList; g; g=g->next, gCount++) {
+			if((mameArray[gCount].title)) {
+				items[i] = new_item(
+				  mameArray[gCount].title, NULL);
+				set_item_userptr(items[i],
+				  mameArray[gCount].g);
+				i++;
+			}
+		}
+		// mameArray is freed, but the title elements are not.
+		// This is on purpose, not a memory leak.  The titles
+		// have been assigned to the ncruses menu items and need
+		// to stay alloc'd; they'll be freed automatically when
+		// the corresponding items are destroyed.
+		free(mameArray);
 	}
 
-	return mameItem; // Return next items[] index
+	return i; // Return next items[] index
 }
 
 // Given a Game struct and an output buffer, format a command string
@@ -283,12 +334,13 @@ static int fceuFilter(const struct dirent *d) {
 
 // After scanning folder for NES ROM files, populate the items[] array with
 // game names with the file extension removed.
-static int fceuItemize(Game *g, int i) {
+static int fceuItemize(Game *gList, int i) {
 	char *str;
-	for(; g; g=g->next) {
-		if((str = strndup(g->name, strrchr(g->name,'.') - g->name))) {
+	for(; gList; gList=gList->next) {
+		if((str = strndup(gList->name,
+		  strrchr(gList->name,'.') - gList->name))) {
 			items[i] = new_item(str, NULL);
-			set_item_userptr(items[i++], g);
+			set_item_userptr(items[i++], gList);
 		}
 	}
 	return i; // Return next items[] index
@@ -357,7 +409,7 @@ int find_roms(void) {
 
 		// Scan ROM folder, build new gameList
 		if((nFiles = scandir(emulator[e].romPath, &dirList,
-		  emulator[e].filter, alphasort)) > 0) {
+		  emulator[e].filter, emulator[e].compar)) > 0) {
 			nEmuTitles++;
 			// Copy dirent array to a Game linked list.
 			while(nFiles--) { // Assembled in reverse
@@ -510,9 +562,19 @@ int main(int argc, char *argv[]) {
 		   case 'z':
 		   case 'x':
 			if((g = item_userptr(current_item(menu)))) {
-				(*emulator[g->emu].command)(g, cmdline);
+
+				const char launchMsg[] = "Starting game...";
+				WINDOW *launchWin = newwin(3,
+				  strlen(launchMsg) + 4,
+				  (LINES - 4) / 2 - 1,
+				  (COLS - strlen(launchMsg)) / 2 - 2);
+				box(launchWin, 0, 0);
+				mvwprintw(launchWin, 1, 2, launchMsg);
+				wrefresh(launchWin);
+
 				def_prog_mode();
 				endwin();
+				(*emulator[g->emu].command)(g, cmdline);
 				i = system(cmdline);
 				reset_prog_mode();
 				if(i) { // If error message, wait for input
@@ -520,6 +582,9 @@ int main(int argc, char *argv[]) {
 					fflush(stdout);
 					while(!getch());
 				}
+
+				delwin(launchWin);
+				redrawwin(mainWin);
 			}
 			break;
 		}
