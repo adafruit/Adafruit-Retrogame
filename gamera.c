@@ -455,8 +455,8 @@ int find_roms(void) {
 		items[i] = NULL;
 		menu     = new_menu(items);
 		set_menu_win(menu, mainWin);
-		set_menu_sub(menu, derwin(mainWin, LINES-6, COLS-2, 1, 1));
-		set_menu_format(menu, LINES-6, 1);
+		set_menu_sub(menu, derwin(mainWin, LINES-5, COLS-2, 1, 1));
+		set_menu_format(menu, LINES-5, 1);
 		set_menu_mark(menu, " ");
 		post_menu(menu);
 	}
