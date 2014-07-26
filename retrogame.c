@@ -195,6 +195,36 @@ void signalHandler(int n) {
 	running = 0;
 }
 
+// Returns 1 if running on early Pi board, 0 otherwise.
+// Relies on info in /proc/cmdline by default; if this is
+// unreliable in the future, easy change to /proc/cpuinfo.
+int isRevOnePi(void) {
+	FILE *fp;
+	char  buf[1024], *ptr;
+	int   n, rev = 0;
+#if 1
+	char *filename = "/proc/cmdline",
+	     *token    = "boardrev=",
+	     *fmt      = "%x";
+#else
+	char *filename = "/proc/cpuinfo",
+	     *token    = "Revision", // Capital R!
+	     *fmt      = " : %x";
+#endif
+
+	if((fp = fopen(filename, "r"))) {
+		if((n = fread(buf, 1, sizeof(buf)-1, fp)) > 0) {
+			buf[n] = 0;
+			if((ptr = strstr(buf, token))) {
+				sscanf(&ptr[strlen(token)], fmt, &rev);
+			}
+		}
+		fclose(fp);
+	}
+
+	return ((rev == 0x02) || (rev == 0x03));
+}
+
 
 // Main stuff ------------------------------------------------------------
 
@@ -222,7 +252,6 @@ int main(int argc, char *argv[]) {
 	                       lastKey = -1;    // Last key down (for repeat)
 	unsigned long          bitMask, bit;    // For Vulcan pinch detect
 	volatile unsigned char shortWait;       // Delay counter
-	struct uinput_user_dev uidev;           // uinput device
 	struct input_event     keyEv, synEv;    // uinput events
 	struct pollfd          p[IOLEN];        // GPIO file descriptors
 
@@ -230,6 +259,16 @@ int main(int argc, char *argv[]) {
 	signal(SIGINT , signalHandler); // Trap basic signals (exit cleanly)
 	signal(SIGKILL, signalHandler);
 
+	// If this is a "Revision 1" Pi board (no mounting holes),
+	// remap certain pin numbers in the io[] array for compatibility.
+	// This way the code doesn't need modification for old boards.
+	if(isRevOnePi()) {
+		for(i=0; i<IOLEN; i++) {
+			if(     io[i].pin ==  2) io[i].pin = 0;
+			else if(io[i].pin ==  3) io[i].pin = 1;
+			else if(io[i].pin == 27) io[i].pin = 21;
+		}
+	}
 
 	// ----------------------------------------------------------------
 	// Although Sysfs provides solid GPIO interrupt handling, there's
@@ -309,6 +348,11 @@ int main(int argc, char *argv[]) {
 	// ----------------------------------------------------------------
 	// Set up uinput
 
+#if 1
+	// Retrogame normally uses /dev/uinput for generating key events.
+	// Cupcade requires this and it's the default.  SDL2 (used by
+	// some newer emulators) doesn't like it, wants /dev/input/event0
+	// instead.  Enable that code by changing to "#if 0" above.
 	if((fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK)) < 0)
 		err("Can't open /dev/uinput");
 	if(ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0)
@@ -320,6 +364,7 @@ int main(int argc, char *argv[]) {
 		}
 	}
 	if(ioctl(fd, UI_SET_KEYBIT, vulcanKey) < 0) err("Can't SET_KEYBIT");
+	struct uinput_user_dev uidev;
 	memset(&uidev, 0, sizeof(uidev));
 	snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "retrogame");
 	uidev.id.bustype = BUS_USB;
@@ -330,6 +375,11 @@ int main(int argc, char *argv[]) {
 		err("write failed");
 	if(ioctl(fd, UI_DEV_CREATE) < 0)
 		err("DEV_CREATE failed");
+#else // SDL2 prefers this event methodology
+	if((fd = open("/dev/input/event0", O_WRONLY | O_NONBLOCK)) < 0)
+		err("Can't open /dev/input/event0");
+#endif
+
 	// Initialize input event structures
 	memset(&keyEv, 0, sizeof(keyEv));
 	keyEv.type  = EV_KEY;
