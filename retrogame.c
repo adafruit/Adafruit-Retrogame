@@ -61,6 +61,7 @@ POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -70,7 +71,12 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <sys/mman.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
+#include <linux/i2c-dev.h>
 
+// Defines to change limits and compiled behavior.
+#define MAX_MCP  4   // Maximum number of MCP23017 devices.
+#define MAX_PINS 64  // Maximum number of pins that can be monitored.
+#define DEBUG 1      // Set to 1 to output debug messages, otherwise 0 to disable.
 
 // START HERE ------------------------------------------------------------
 // This table remaps GPIO inputs to keyboard values.  In this initial
@@ -83,23 +89,27 @@ POSSIBILITY OF SUCH DAMAGE.
 // create a spare ground point.
 
 #define GND -1
+#define SOURCE_GPIO -1
+#define SOURCE_MCP1  0
+#define SOURCE_MCP2  1
 struct {
 	int pin;
 	int key;
+	int source;
 } *io, // In main() this pointer is set to one of the two tables below.
    ioTFT[] = {
 	// This pin/key table is used if an Adafruit PiTFT display
 	// is detected (e.g. Cupcade or PiGRRL).
 	// Input   Output (from /usr/include/linux/input.h)
-	{   2,     KEY_LEFT     },   // Joystick (4 pins)
-	{   3,     KEY_RIGHT    },
-	{   4,     KEY_DOWN     },
-	{  17,     KEY_UP       },
-	{  27,     KEY_Z        },   // A/Fire/jump/primary
-	{  22,     KEY_X        },   // B/Bomb/secondary
-	{  23,     KEY_R        },   // Credit
-	{  18,     KEY_Q        },   // Start 1P
-	{  -1,     -1           } }, // END OF LIST, DO NOT CHANGE
+	{   2,     KEY_LEFT,    SOURCE_GPIO },   // Joystick (4 pins)
+	{   3,     KEY_RIGHT,   SOURCE_GPIO },
+	{   4,     KEY_DOWN,    SOURCE_GPIO },
+	{  17,     KEY_UP,      SOURCE_GPIO },
+	{  27,     KEY_Z,       SOURCE_GPIO },   // A/Fire/jump/primary
+	{  22,     KEY_X,       SOURCE_GPIO },   // B/Bomb/secondary
+	{  23,     KEY_R,       SOURCE_GPIO },   // Credit
+	{  18,     KEY_Q,       SOURCE_GPIO },   // Start 1P
+	{  -1,     -1           -1          } }, // END OF LIST, DO NOT CHANGE
 	// MAME must be configured with 'z' & 'x' as buttons 1 & 2 -
 	// this was required for the accompanying 'menu' utility to
 	// work (catching crtl/alt w/ncurses gets totally NASTY).
@@ -113,14 +123,17 @@ struct {
 	// (using HDMI or composite instead), as with our original
 	// retro gaming guide.
 	// Input   Output (from /usr/include/linux/input.h)
-	{  25,     KEY_LEFT     },   // Joystick (4 pins)
-	{   9,     KEY_RIGHT    },
-	{  10,     KEY_UP       },
-	{  17,     KEY_DOWN     },
-	{  23,     KEY_LEFTCTRL },   // A/Fire/jump/primary
-	{   7,     KEY_LEFTALT  },   // B/Bomb/secondary
+	{  25,     KEY_LEFT,     SOURCE_GPIO },   // Joystick (4 pins)
+	{   9,     KEY_RIGHT,    SOURCE_GPIO },
+	{  10,     KEY_UP,       SOURCE_GPIO },
+	{  17,     KEY_DOWN,     SOURCE_GPIO },
+	{  23,     KEY_LEFTCTRL, SOURCE_GPIO },   // A/Fire/jump/primary
+	{   7,     KEY_LEFTALT,  SOURCE_GPIO },   // B/Bomb/secondary
+	{   0,     KEY_X,        SOURCE_MCP1 },   // MCP Example configuration
+	{   1,     GND,          SOURCE_MCP1 },   // Move this to comments!
+	{   2,     KEY_Z,        SOURCE_MCP1 },
 	// For credit/start/etc., use USB keyboard or add more buttons.
-	{  -1,     -1           } }; // END OF LIST, DO NOT CHANGE
+	{  -1,     -1            -1          } }; // END OF LIST, DO NOT CHANGE
 
 // A "Vulcan nerve pinch" (holding down a specific button combination
 // for a few seconds) issues an 'esc' keypress to MAME (which brings up
@@ -139,6 +152,19 @@ const int           vulcanKey  = KEY_ESC, // Keycode to send
                     repTime1   = 500,     // Key hold time to begin repeat
                     repTime2   = 100;     // Time between key repetitions
 
+// Define list of MCP devices.
+// Must set the path to the I2C bus, the I2C bus address, and the GPIO
+// which is connected to an interrupt pin on the MCP device.
+struct {
+	char* path;
+	uint16_t address;
+	int pin;
+} *mcp,
+   mcpList[] = {
+	{ "/dev/i2c-1", 0x20, 18 },
+	//{ "/dev/i2c-1", 0x21, 23 },
+	{ 0,               0,  0 } // Sentinel to signal end of MCP list.
+};
 
 // A few globals ---------------------------------------------------------
 
@@ -150,9 +176,14 @@ volatile unsigned int
   *gpio;                             // GPIO register table
 const int
    debounceTime = 20;                // 20 ms for button debouncing
+int
+   mcplen = 0,                       // Number of MCP23017 devices.
+   mcpfd[MAX_MCP];                   // MCP23017 devices file descriptors.
 
 
 // Some utility functions ------------------------------------------------
+
+#define DEBUG_PRINT(...) { if (DEBUG) printf(__VA_ARGS__); }
 
 // Set one GPIO pin attribute through the Sysfs interface.
 int pinConfig(int pin, char *attr, char *value) {
@@ -183,17 +214,22 @@ void cleanup() {
 		}
 		close(fd);
 	}
+	// Close MCP device files.
+	for (i=0; i<mcplen; ++i) {
+		close(mcpfd[i]);
+	}
 }
 
 // Quick-n-dirty error reporter; print message, clean up and exit.
 void err(char *msg) {
-	printf("%s: %s.  Try 'sudo %s'.\n", progName, msg, progName);
+	printf("%s: %s.\n", progName, msg);
 	cleanup();
 	exit(1);
 }
 
 // Interrupt handler -- set global flag to abort main loop.
 void signalHandler(int n) {
+	DEBUG_PRINT("Received INT or KILL signal.\n");
 	running = 0;
 }
 
@@ -227,6 +263,51 @@ int isRevOnePi(void) {
 	return ((rev == 0x02) || (rev == 0x03));
 }
 
+// Read a 16 bit register value from an MCP device.
+uint16_t mcpReadReg16(int fd, uint8_t reg) {
+	uint16_t value = 0;
+	uint8_t buffer[2];
+	buffer[0] = reg;
+	if (write(fd, buffer, 1) != 1) 
+		err("Can't write MCP register!");
+	if (read(fd, buffer, 2) != 2) 
+		err("Can't read MCP register!");
+	value = (buffer[1] << 8) | buffer[0];
+	DEBUG_PRINT("Read 0x%04X from register 0x%02X on I2C device %d\n", value, reg, fd);
+	return value;
+}
+
+// Read a 8 bit register value from an MCP device.
+uint8_t mcpReadReg8(int fd, uint8_t reg) {
+	uint8_t buffer = reg;
+	if (write(fd, &buffer, 1) != 1) 
+		err("Can't write MCP register!");
+	if (read(fd, &buffer, 1) != 1) 
+		err("Can't read MCP register!");
+	DEBUG_PRINT("Read 0x%02X from register 0x%02X on I2C device %d\n", buffer, reg, fd);
+	return buffer;
+}
+
+// Write a 16 bit register value to an MCP device.
+void mcpWriteReg16(int fd, uint8_t reg, uint16_t value) {
+	uint8_t buffer[3];
+	buffer[0] = reg;
+	buffer[1] = value & 0xFF;
+	buffer[2] = (value >> 8) & 0xFF;
+	if (write(fd, buffer, 3) != 3) 
+		err("Can't write MCP register!");
+	DEBUG_PRINT("Wrote 0x%04X to register 0x%02X on I2C device %d\n", value, reg, fd);
+}
+
+// Write a 8 bit register value to an MCP device.
+void mcpWriteReg8(int fd, uint8_t reg, uint8_t value) {
+	uint8_t buffer[2];
+	buffer[0] = reg;
+	buffer[1] = value;
+	if (write(fd, buffer, 2) != 2) 
+		err("Can't write MCP register!");
+	DEBUG_PRINT("Wrote 0x%02X to register 0x%02X on I2C device %d\n", value, reg, fd);
+}
 
 // Main stuff ------------------------------------------------------------
 
@@ -236,7 +317,22 @@ int isRevOnePi(void) {
 #define GPPUD             (0x94 / 4)
 #define GPPUDCLK0         (0x98 / 4)
 
+// MCP23017 register addresses
+#define IODIRA		0x00	// bank A GPIO pin address direction
+#define IODIRB		0x01	// bank B GPIO pin address direction
+#define GPINTENA	0x04	// enable interrupt on change of GPIOA register
+#define GPINTENB	0x05	// enable interrupt on change of GPIOB register
+#define GPPUA		0x0C	// bank A pull-up register address
+#define GPPUB		0x0D	// bank B pull-up register address
+#define INTCAPA		0x10	// store GPIOA register values on interrupt
+#define INTCAPB		0x11	// store GPIOB register values on interrupt
+#define GPIOA		0x12	// bank A GPIO pin address
+#define GPIOB		0x13	// bank B GPIO pin address
+#define IOCON       0x0A    // control register address
+
 int main(int argc, char *argv[]) {
+
+	DEBUG_PRINT("Starting...\n");
 
 	// A few arrays here are declared with 32 elements, even though
 	// values aren't needed for io[] members where the 'key' value is
@@ -246,20 +342,35 @@ int main(int argc, char *argv[]) {
 	char                   buf[50],      // For sundry filenames
 	                       c;            // Pin input value ('0'/'1')
 	int                    fd,           // For mmap, sysfs, uinput
-	                       i, j,         // Asst. counter
+	                       i, j, k,      // Asst. counter
 	                       bitmask,      // Pullup enable bitmask
 	                       timeout = -1, // poll() timeout
-	                       intstate[32], // Last-read state
-	                       extstate[32], // Debounced state
-	                       lastKey = -1; // Last key down (for repeat)
+	                       intstate[MAX_PINS], // Last-read state
+	                       extstate[MAX_PINS], // Debounced state
+	                       lastKey = -1, // Last key down (for repeat)
+	                       curpin,       // Current MCP pin value
+	                       oldpin;       // Old MCP pin value
 	unsigned long          bitMask, bit; // For Vulcan pinch detect
 	volatile unsigned char shortWait;    // Delay counter
 	struct input_event     keyEv, synEv; // uinput events
-	struct pollfd          p[32];        // GPIO file descriptors
+	struct pollfd          p[MAX_PINS];  // GPIO file descriptors
+	uint16_t               reg,          // MCP register value.
+	                       mcpOld[MAX_MCP]; // MCP chip last read states.
 
 	progName = argv[0];             // For error reporting
 	signal(SIGINT , signalHandler); // Trap basic signals (exit cleanly)
 	signal(SIGKILL, signalHandler);
+
+	// Default to MCP list in code.
+	mcp = mcpList;
+
+	// Count the number of MCP devices and initialize MCP last input buffers.
+	mcplen = 0;
+	while (mcp[mcplen].path != 0) {
+		mcpOld[mcplen] = 0;
+		mcplen++;
+	}
+	DEBUG_PRINT("Using %d MCP23017 devices.\n", mcplen);
 
 	// Select io[] table for Cupcade (TFT) or 'normal' project.
 	io = (access("/etc/modprobe.d/adafruit.conf", F_OK) ||
@@ -270,10 +381,24 @@ int main(int argc, char *argv[]) {
 	// This way the code doesn't need modification for old boards.
 	if(isRevOnePi()) {
 		for(i=0; io[i].pin >= 0; i++) {
-			if(     io[i].pin ==  2) io[i].pin = 0;
-			else if(io[i].pin ==  3) io[i].pin = 1;
-			else if(io[i].pin == 27) io[i].pin = 21;
+			if(     io[i].pin ==  2 && io[i].source == SOURCE_GPIO) io[i].pin = 0;
+			else if(io[i].pin ==  3 && io[i].source == SOURCE_GPIO) io[i].pin = 1;
+			else if(io[i].pin == 27 && io[i].source == SOURCE_GPIO) io[i].pin = 21;
 		}
+	}
+
+	// ----------------------------------------------------------------
+	// Initialize MCP23017 devices.
+
+	for (i=0; i<mcplen; ++i) {
+		// Open I2C bus.
+		if ((mcpfd[i] = open(mcp[i].path, O_RDWR)) < 0)
+			err("Can't open I2C bus!");
+		// Set I2C slave address.
+		if (ioctl(mcpfd[i], I2C_SLAVE, mcp[i].address) < 0)
+			err("Can't set I2C address");
+		// Set IOCON interrupt mirroring bit to 1, all others to 0.
+		mcpWriteReg8(mcpfd[i], IOCON, 0x40);
 	}
 
 	// ----------------------------------------------------------------
@@ -285,7 +410,7 @@ int main(int argc, char *argv[]) {
 	// Loo on elinux.org
 
 	if((fd = open("/dev/mem", O_RDWR | O_SYNC)) < 0)
-		err("Can't open /dev/mem");
+		err("Can't open /dev/mem  Make sure to run with sudo, like 'sudo ./retrogame'");
 	gpio = mmap(            // Memory-mapped I/O
 	  NULL,                 // Any adddress will do
 	  BLOCK_SIZE,           // Mapped block length
@@ -297,7 +422,7 @@ int main(int argc, char *argv[]) {
 	if(gpio == MAP_FAILED) err("Can't mmap()");
 	// Make combined bitmap of pullup-enabled pins:
 	for(bitmask=i=0; io[i].pin >= 0; i++)
-		if(io[i].key != GND) bitmask |= (1 << io[i].pin);
+		if(io[i].key != GND && io[i].source == SOURCE_GPIO) bitmask |= (1 << io[i].pin);
 	gpio[GPPUD]     = 2;                    // Enable pullup
 	for(shortWait=150;--shortWait;);        // Min 150 cycle wait
 	gpio[GPPUDCLK0] = bitmask;              // Set pullup mask
@@ -306,6 +431,46 @@ int main(int argc, char *argv[]) {
 	gpio[GPPUDCLK0] = 0;
 	(void)munmap((void *)gpio, BLOCK_SIZE); // Done with GPIO mmap()
 
+	// ----------------------------------------------------------------
+	// Initialize MCP23017 pins to inputs and outputs.
+
+	for (i=0; io[i].pin >= 0; ++i) {
+		// Enable input, pull-up resistors, and interrupts for input pins.
+		if(io[i].key != GND && io[i].source != SOURCE_GPIO) {
+			// Read the MCP direction register value, flip the appropriate
+			// bit, and then write the new register value.  This isn't
+			// the most efficient update, but it's only done once at the
+			// start.
+			reg = mcpReadReg16(mcpfd[io[i].source], IODIRA);
+			reg |= (1 << io[i].pin);
+			mcpWriteReg16(mcpfd[io[i].source], IODIRA, reg);
+			// Enable pull-up resistor.
+			reg = mcpReadReg16(mcpfd[io[i].source], GPPUA);
+			reg |= (1 << io[i].pin);
+			mcpWriteReg16(mcpfd[io[i].source], GPPUA, reg);
+			// Enable interrupts on change.
+			reg = mcpReadReg16(mcpfd[io[i].source], GPINTENA);
+			reg |= (1 << io[i].pin);
+			mcpWriteReg16(mcpfd[io[i].source], GPINTENA, reg);
+		}
+		// Set output to low/ground for ground pins.
+		else if (io[i].key == GND && io[i].source != SOURCE_GPIO) {
+			// Set pin as output.
+			reg = mcpReadReg16(mcpfd[io[i].source], IODIRA);
+			reg &= ~(1 << io[i].pin);
+			mcpWriteReg16(mcpfd[io[i].source], IODIRA, reg);
+			// Set low value for pin.
+			reg = mcpReadReg16(mcpfd[io[i].source], GPIOA);
+			reg &= ~(1 << io[i].pin);
+			mcpWriteReg16(mcpfd[io[i].source], GPIOA, reg);
+		}
+	}
+
+	// Get initial MCP input state and clear any pending interrupts.
+	for (i=0; i<mcplen; ++i) {
+		mcpOld[i] = mcpReadReg16(mcpfd[i], GPIOA);
+		DEBUG_PRINT("MCP device %d has initial value %04X.\n", i, mcpOld[i]);
+	}
 
 	// ----------------------------------------------------------------
 	// All other GPIO config is handled through the sysfs interface.
@@ -317,12 +482,13 @@ int main(int argc, char *argv[]) {
 		sprintf(buf, "%d", io[i].pin);
 		write(fd, buf, strlen(buf));             // Export pin
 		pinConfig(io[i].pin, "active_low", "0"); // Don't invert
-		if(io[i].key == GND) {
+		if(io[i].key == GND && io[i].source == SOURCE_GPIO) {
 			// Set pin to output, value 0 (ground)
 			if(pinConfig(io[i].pin, "direction", "out") ||
 			   pinConfig(io[i].pin, "value"    , "0"))
 				err("Pin config failed (GND)");
-		} else {
+		} 
+		else if (io[i].source == SOURCE_GPIO) {
 			// Set pin to input, detect rise+fall events
 			if(pinConfig(io[i].pin, "direction", "in") ||
 			   pinConfig(io[i].pin, "edge"     , "both"))
@@ -337,6 +503,9 @@ int main(int argc, char *argv[]) {
 			// at the head of p[], and there may be unused
 			// elements at the end for each GND.  Same applies
 			// to the intstate[] and extstate[] arrays.
+			// Note that p[] and intstate[]/extstate[] also
+			// include MCP interrupt pins which are also
+			// monitored for changes.
 			if((p[j].fd = open(buf, O_RDONLY)) < 0)
 				err("Can't access pin value");
 			intstate[j] = 0;
@@ -347,9 +516,31 @@ int main(int argc, char *argv[]) {
 			p[j].revents = 0;
 			j++;
 		}
-	} // 'j' is now count of non-GND items in io[] table
+	}
+	// Add MCP device interrupt pins to monitored GPIO pins.
+	for (i=0; i<mcplen; ++i) {
+		// Set pin to input, detect rise+fall events
+		sprintf(buf, "%d", mcp[i].pin);
+		write(fd, buf, strlen(buf));  // Export pin
+		if(pinConfig(mcp[i].pin, "direction", "in") ||
+		   pinConfig(mcp[i].pin, "edge"     , "both"))
+			err("Pin config failed");
+		// Get initial pin value
+		sprintf(buf, "%s/gpio%d/value",
+		  sysfs_root, mcp[i].pin);
+		if((p[j].fd = open(buf, O_RDONLY)) < 0)
+			err("Can't access pin value");
+		intstate[j] = 0;
+		if((read(p[j].fd, &c, 1) == 1) && (c == '0'))
+			intstate[j] = 1;
+		extstate[j] = intstate[j];
+		p[j].events  = POLLPRI; // Set up poll() events
+		p[j].revents = 0;
+		j++;
+	}
+	// 'j' is now count of monitorired pins in io[] table 
+	// (non-GND items + MCP device interrupt pins)
 	close(fd); // Done exporting
-
 
 	// ----------------------------------------------------------------
 	// Set up uinput
@@ -402,6 +593,7 @@ int main(int argc, char *argv[]) {
 	// function watches for GPIO IRQs in this case; it is NOT
 	// continually polling the pins!  Processor load is near zero.
 
+	DEBUG_PRINT("Waiting for input...\n");
 	while(running) { // Signal handler can set this to 0 to exit
 		// Wait for IRQ on pin (or timeout for button debounce)
 		if(poll(p, j, timeout) > 0) { // If IRQ...
@@ -428,7 +620,8 @@ int main(int argc, char *argv[]) {
 			bitMask = 0L; // Mask of buttons currently pressed
 			bit     = 1L;
 			for(c=i=j=0; io[i].pin >= 0; i++, bit<<=1) {
-				if(io[i].key != GND) {
+				if(io[i].key != GND && io[i].source == SOURCE_GPIO) {
+					// Handle GPIO pin changes.
 					// Compare internal state against
 					// previously-issued value.  Send
 					// keystrokes only for changed states.
@@ -439,6 +632,7 @@ int main(int argc, char *argv[]) {
 						write(fd, &keyEv,
 						  sizeof(keyEv));
 						c = 1; // Follow w/SYN event
+						DEBUG_PRINT("Input %d changed, sent key %d value %d.\n", i, keyEv.code, keyEv.value);
 						if(intstate[j]) { // Press?
 							// Note pressed key
 							// and set initial
@@ -457,6 +651,57 @@ int main(int argc, char *argv[]) {
 					if(intstate[i]) bitMask |= bit;
 				}
 			}
+			// Handle MCP pin changes if the MCP interrupt pin changed.
+			for (i=0; i<mcplen; ++i) {
+				// Check if MCP state changed.
+				if(intstate[j] != extstate[j]) {
+					extstate[j] = intstate[j];
+					if(intstate[j]) { // MCP interrupt occured (active low)
+						// Grab the current input state from the chip.
+						reg = mcpReadReg16(mcpfd[i], GPIOA);
+						// Compare input state to previous for each of this
+						// MCP chip's inputs.
+						bit = 1L;
+						for (k=0; io[k].pin >= 0; k++, bit<<=1) {
+							// Filter to just the defined inputs for this MCP chip.
+							if (io[k].source == i) {
+								// Check if the pin changed state.
+								oldpin = mcpOld[i] & (1 << io[k].pin);
+								curpin = reg       & (1 << io[k].pin);
+								if (oldpin != curpin) {
+									// State changed, fire key event.
+									keyEv.code  = io[k].key;
+									// Note button is pressed when curpin is low
+									// because buttons pull to ground when pressed.
+									keyEv.value = !curpin ? 1 : 0;
+									write(fd, &keyEv, sizeof(keyEv));
+									c = 1; // Follow w/SYN event
+									DEBUG_PRINT("Input %d changed, sent key %d value %d.\n", k, keyEv.code, keyEv.value);
+									if(!curpin) { // Press?
+										// Note pressed key
+										// and set initial
+										// repeat interval.
+										lastKey = k;
+										timeout = repTime1;
+									} else { // Release?
+										// Stop repeat and
+										// return to normal
+										// IRQ monitoring
+										// (no timeout).
+										lastKey = timeout = -1;
+									}
+								}
+								// Update vulcan bitmask if key is pressed.
+								if (!curpin) bitMask |= bit;
+							}
+						}
+						// Fire appropriate key events. (set c=1, lastkey, timeout)
+						// Set previous input state to current.
+						mcpOld[i] = reg;
+					}
+				}
+				j++;
+			}
 
 			// If the "Vulcan nerve pinch" buttons are pressed,
 			// set long timeout -- if this time elapses without
@@ -472,6 +717,7 @@ int main(int argc, char *argv[]) {
 				usleep(10000); // Be slow, else MAME flakes
 				write(fd, &synEv, sizeof(synEv));
 				usleep(10000);
+				DEBUG_PRINT("Sent vulcan key press.\n");
 			}
 			timeout = -1; // Return to normal processing
 			c       = 0;  // No add'l SYN required
