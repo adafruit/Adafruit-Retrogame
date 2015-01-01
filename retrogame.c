@@ -119,6 +119,13 @@ struct {
 	{  17,     KEY_DOWN     },
 	{  23,     KEY_LEFTCTRL },   // A/Fire/jump/primary
 	{   7,     KEY_LEFTALT  },   // B/Bomb/secondary
+
+
+
+
+
+
+
 	// For credit/start/etc., use USB keyboard or add more buttons.
 	{  -1,     -1           } }; // END OF LIST, DO NOT CHANGE
 
@@ -251,6 +258,7 @@ int main(int argc, char *argv[]) {
 	                       timeout = -1, // poll() timeout
 	                       intstate[32], // Last-read state
 	                       extstate[32], // Debounced state
+			       debouncing[32],//Delay 
 	                       lastKey = -1; // Last key down (for repeat)
 	unsigned long          bitMask, bit; // For Vulcan pinch detect
 	volatile unsigned char shortWait;    // Delay counter
@@ -343,6 +351,7 @@ int main(int argc, char *argv[]) {
 			if((read(p[j].fd, &c, 1) == 1) && (c == '0'))
 				intstate[j] = 1;
 			extstate[j] = intstate[j];
+			debouncing[i] = 0;
 			p[j].events  = POLLPRI; // Set up poll() events
 			p[j].revents = 0;
 			j++;
@@ -416,6 +425,15 @@ int main(int argc, char *argv[]) {
 					if(c == '0')      intstate[i] = 1;
 					else if(c == '1') intstate[i] = 0;
 					p[i].revents = 0; // Clear flag
+					if(!debouncing[i]) { // No debouncing necessary
+						debouncing[i]=debounceTime;
+						if(intstate[j] != extstate[j]) {
+							extstate[j] = intstate[j];
+							keyEv.code  = io[i].key;
+							keyEv.value = intstate[j];
+							write(fd, &keyEv, sizeof(keyEv));	
+						}
+					}
 				}
 			}
 			timeout = debounceTime; // Set timeout for debounce
@@ -429,6 +447,8 @@ int main(int argc, char *argv[]) {
 			bit     = 1L;
 			for(c=i=j=0; io[i].pin >= 0; i++, bit<<=1) {
 				if(io[i].key != GND) {
+					if(debouncing[i]) 	debouncing[i]-=timeout;
+					if(debouncing[i]<0) debouncing[i]=0;
 					// Compare internal state against
 					// previously-issued value.  Send
 					// keystrokes only for changed states.
