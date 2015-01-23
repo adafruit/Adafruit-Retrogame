@@ -328,7 +328,7 @@ static void mameCommand(Game *g, char *cmdline) {
 // gnuboy-specific filter function for scandir() -- given a dirent struct,
 // returns 1 if it's a likely ROM file candidate (ends in .gb).
 static int gboyFilter(const struct dirent *d) {
-	static const char *ext[] = { "gb" };
+	static const char *ext[] = { "gb", "gbc" };
 	char              *ptr;
 	int                i;
 
