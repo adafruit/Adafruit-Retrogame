@@ -83,6 +83,7 @@ POSSIBILITY OF SUCH DAMAGE.
 // create a spare ground point.
 
 #define GND -1
+#define array_size(array) (sizeof(array)/sizeof(array[0]))
 struct {
 	int pin;
 	int key;
@@ -133,9 +134,14 @@ struct {
 // Also key auto-repeat times are set here.  This is for navigating the
 // game menu using the 'gamera' utility; MAME disregards key repeat
 // events (as it should).
-const unsigned long vulcanMask = (1L << 6) | (1L << 7);
-const int           vulcanKey  = KEY_ESC, // Keycode to send
-                    vulcanTime = 1500,    // Pinch time in milliseconds
+struct vulcanMap {
+	unsigned long mask;
+	int key;
+};
+struct vulcanMap vulcanKeys[] = {
+	   {((1L << 4) | (1L << 5)), KEY_ESC}
+};
+const int           vulcanTime = 1500,    // Pinch time in milliseconds
                     repTime1   = 500,     // Key hold time to begin repeat
                     repTime2   = 100;     // Time between key repetitions
 
@@ -246,12 +252,13 @@ int main(int argc, char *argv[]) {
 	char                   buf[50],      // For sundry filenames
 	                       c;            // Pin input value ('0'/'1')
 	int                    fd,           // For mmap, sysfs, uinput
-	                       i, j,         // Asst. counter
+	                       i, j, k,      // Asst. counter
 	                       bitmask,      // Pullup enable bitmask
 	                       timeout = -1, // poll() timeout
 	                       intstate[32], // Last-read state
 	                       extstate[32], // Debounced state
-	                       lastKey = -1; // Last key down (for repeat)
+	                       lastKey = -1, // Last key down (for repeat)
+			       vulcanKey = 0;// vulcan key to send
 	unsigned long          bitMask, bit; // For Vulcan pinch detect
 	volatile unsigned char shortWait;    // Delay counter
 	struct input_event     keyEv, synEv; // uinput events
@@ -369,7 +376,9 @@ int main(int argc, char *argv[]) {
 				err("Can't SET_KEYBIT");
 		}
 	}
-	if(ioctl(fd, UI_SET_KEYBIT, vulcanKey) < 0) err("Can't SET_KEYBIT");
+	for(i=0; i < array_size(vulcanKeys); i++){
+		if(ioctl(fd, UI_SET_KEYBIT, vulcanKeys[i].key) < 0) err("Can't SET_KEYBIT");
+	}
 	struct uinput_user_dev uidev;
 	memset(&uidev, 0, sizeof(uidev));
 	snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "retrogame");
@@ -461,8 +470,12 @@ int main(int argc, char *argv[]) {
 			// If the "Vulcan nerve pinch" buttons are pressed,
 			// set long timeout -- if this time elapses without
 			// a button state change, esc keypress will be sent.
-			if((bitMask & vulcanMask) == vulcanMask)
-				timeout = vulcanTime;
+			for(k=0; k < array_size(vulcanKeys); k++){
+				if((bitMask & vulcanKeys[k].mask) == vulcanKeys[k].mask){
+					timeout = vulcanTime;
+					vulcanKey = vulcanKeys[k].key;
+				}
+			}
 		} else if(timeout == vulcanTime) { // Vulcan timeout occurred
 			// Send keycode (MAME exits or displays exit menu)
 			keyEv.code = vulcanKey;
