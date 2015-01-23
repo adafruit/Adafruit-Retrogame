@@ -486,7 +486,7 @@ int find_roms(void) {
 	  (items = (ITEM**)malloc((nGames+nEmuTitles+1) * sizeof(ITEM *)))) {
 		i = 0;
 		for(e=0; e<N_EMULATORS; e++) {
-			if(nEmuTitles) {
+			if(nEmuTitles && emulator[e].gameList) {
 				// Add non-selectable emulator title
 				items[i] = new_item(emulator[e].title, NULL);
 				item_opts_off(items[i++], O_SELECTABLE);
