@@ -113,13 +113,26 @@ struct {
 	// (using HDMI or composite instead), as with our original
 	// retro gaming guide.
 	// Input   Output (from /usr/include/linux/input.h)
-	{  25,     KEY_LEFT     },   // Joystick (4 pins)
-	{   9,     KEY_RIGHT    },
-	{  10,     KEY_UP       },
-	{  17,     KEY_DOWN     },
-	{  23,     KEY_LEFTCTRL },   // A/Fire/jump/primary
-	{   7,     KEY_LEFTALT  },   // B/Bomb/secondary
-	// For credit/start/etc., use USB keyboard or add more buttons.
+	{   2,     KEY_UP     },  //D UP
+	{   3,     KEY_DOWN   },  //D DOWN
+	{   4,     KEY_LEFT   },  //D LEFT
+	{   7,     KEY_RIGHT  },  //D RIGHT
+	{   8,     KEY_ESC    },  //ESC
+	{   9,     KEY_S      },  //START
+	{  10,     KEY_Z      },  //SELECT
+	{  11,     KEY_A      },  //A
+	{  14,     KEY_B      },  //B
+	{  17,     KEY_X      },  //X
+	{  18,     KEY_Y      },  //Y
+	{  22,     KEY_Q      },  //C UP 
+	{  23,     KEY_W      },  //C DOWN
+	{  24,     KEY_E      },  //C LEFT
+	{  25,     KEY_R      },  //C RIGHT
+	//{  27,     KEY_T      },  //Z 
+        {  28,     KEY_U      },  //L1
+        {  29,     KEY_I      },  //R1
+        //{  30,     KEY_O      },  //L2
+        //{  31,     KEY_P      },  //R2
 	{  -1,     -1           } }; // END OF LIST, DO NOT CHANGE
 
 // A "Vulcan nerve pinch" (holding down a specific button combination
@@ -134,11 +147,11 @@ struct {
 // game menu using the 'gamera' utility; MAME disregards key repeat
 // events (as it should).
 const unsigned long vulcanMask = (1L << 6) | (1L << 7);
-const int           vulcanKey  = KEY_ESC, // Keycode to send
-                    vulcanTime = 1500,    // Pinch time in milliseconds
-                    repTime1   = 500,     // Key hold time to begin repeat
-                    repTime2   = 100;     // Time between key repetitions
-
+const int           vulcanKey  = KEY_G, // Keycode to send
+                    vulcanTime = 1000000,    // Pinch time in milliseconds
+                    repTime1   = 1000000,     // Key hold time to begin repeat
+                    repTime2   = 1000000;     // Time between key repetitions
+// MJB 2/6/2015 Setting values really high to avoid being used, will probably just strip it out eventuall
 
 // A few globals ---------------------------------------------------------
 
