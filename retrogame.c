@@ -197,44 +197,68 @@ void signalHandler(int n) {
 	running = 0;
 }
 
-// Returns 1 if running on early Pi board, 0 otherwise.
-// Relies on info in /proc/cmdline by default; if this is
-// unreliable in the future, easy change to /proc/cpuinfo.
-int isRevOnePi(void) {
+// Detect Pi board type.  Doesn't return super-granular details,
+// just the most basic distinction needed for GPIO compatibility:
+// 0: Pi 1 Model B revision 1
+// 1: Pi 1 Model B revision 2, Model A, Model B+, Model A+
+// 2: Pi 2 Model B
+
+static int boardType(void) {
 	FILE *fp;
 	char  buf[1024], *ptr;
-	int   n, rev = 0;
-#if 1
-	char *filename = "/proc/cmdline",
-	     *token    = "boardrev=",
-	     *fmt      = "%x";
-#else
-	char *filename = "/proc/cpuinfo",
-	     *token    = "Revision", // Capital R!
-	     *fmt      = " : %x";
-#endif
+	int   n, board = 1; // Assume Pi1 Rev2 by default
 
-	if((fp = fopen(filename, "r"))) {
-		if((n = fread(buf, 1, sizeof(buf)-1, fp)) > 0) {
-			buf[n] = 0;
-			if((ptr = strstr(buf, token))) {
-				sscanf(&ptr[strlen(token)], fmt, &rev);
+	// Relies on info in /proc/cmdline.  If this becomes unreliable
+	// in the future, alt code below uses /proc/cpuinfo if any better.
+#if 1
+	if((fp = fopen("/proc/cmdline", "r"))) {
+		while(fgets(buf, sizeof(buf), fp)) {
+			if((ptr = strstr(buf, "mem_size=")) &&
+			   (sscanf(&ptr[9], "%x", &n) == 1) &&
+			   (n == 0x3F000000)) {
+				board = 2; // Appears to be a Pi 2
+				break;
+			} else if((ptr = strstr(buf, "boardrev=")) &&
+			          (sscanf(&ptr[9], "%x", &n) == 1) &&
+			          ((n == 0x02) || (n == 0x03))) {
+				board = 0; // Appears to be an early Pi
+				break;
 			}
 		}
 		fclose(fp);
 	}
+#else
+	char s[8];
+	if((fp = fopen("/proc/cpuinfo", "r"))) {
+		while(fgets(buf, sizeof(buf), fp)) {
+			if((ptr = strstr(buf, "Hardware")) &&
+			   (sscanf(&ptr[8], " : %7s", s) == 1) &&
+			   (!strcmp(s, "BCM2709"))) {
+				board = 2; // Appears to be a Pi 2
+				break;
+			} else if((ptr = strstr(buf, "Revision")) &&
+			          (sscanf(&ptr[8], " : %x", &n) == 1) &&
+			          ((n == 0x02) || (n == 0x03))) {
+				board = 0; // Appears to be an early Pi
+				break;
+			}
+		}
+		fclose(fp);
+	}
+#endif
 
-	return ((rev == 0x02) || (rev == 0x03));
+	return board;
 }
-
 
 // Main stuff ------------------------------------------------------------
 
-#define BCM2708_PERI_BASE 0x20000000
-#define GPIO_BASE         (BCM2708_PERI_BASE + 0x200000)
-#define BLOCK_SIZE        (4*1024)
-#define GPPUD             (0x94 / 4)
-#define GPPUDCLK0         (0x98 / 4)
+#define PI1_BCM2708_PERI_BASE 0x20000000
+#define PI1_GPIO_BASE         (PI1_BCM2708_PERI_BASE + 0x200000)
+#define PI2_BCM2708_PERI_BASE 0x3F000000
+#define PI2_GPIO_BASE         (PI2_BCM2708_PERI_BASE + 0x200000)
+#define BLOCK_SIZE            (4*1024)
+#define GPPUD                 (0x94 / 4)
+#define GPPUDCLK0             (0x98 / 4)
 
 int main(int argc, char *argv[]) {
 
@@ -244,7 +268,8 @@ int main(int argc, char *argv[]) {
 	// tests to create these arrays -- but may waste a handful of
 	// bytes for any declared GNDs.
 	char                   buf[50],      // For sundry filenames
-	                       c;            // Pin input value ('0'/'1')
+	                       c,            // Pin input value ('0'/'1')
+	                       board;        // 0=Pi1Rev1, 1=Pi1Rev2, 2=Pi2
 	int                    fd,           // For mmap, sysfs, uinput
 	                       i, j,         // Asst. counter
 	                       bitmask,      // Pullup enable bitmask
@@ -268,7 +293,8 @@ int main(int argc, char *argv[]) {
 	// If this is a "Revision 1" Pi board (no mounting holes),
 	// remap certain pin numbers in the io[] array for compatibility.
 	// This way the code doesn't need modification for old boards.
-	if(isRevOnePi()) {
+	board = boardType();
+	if(board == 0) {
 		for(i=0; io[i].pin >= 0; i++) {
 			if(     io[i].pin ==  2) io[i].pin = 0;
 			else if(io[i].pin ==  3) io[i].pin = 1;
@@ -292,7 +318,10 @@ int main(int argc, char *argv[]) {
 	  PROT_READ|PROT_WRITE, // Enable read+write
 	  MAP_SHARED,           // Shared with other processes
 	  fd,                   // File to map
-	  GPIO_BASE );          // Offset to GPIO registers
+	  (board == 2) ?
+	   PI2_GPIO_BASE :      // -> GPIO registers
+	   PI1_GPIO_BASE);
+
 	close(fd);              // Not needed after mmap()
 	if(gpio == MAP_FAILED) err("Can't mmap()");
 	// Make combined bitmap of pullup-enabled pins:
