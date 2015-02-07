@@ -25,41 +25,22 @@ Save the file by pressing Ctrl-O and enter, then press Ctrl-x to exit.  Restart 
 Current Pin to Keyboard Input Layout:
 
 	{   2,     KEY_UP     },  //D UP
-  
 	{   3,     KEY_DOWN   },  //D DOWN
-  
 	{   4,     KEY_LEFT   },  //D LEFT
-	
 	{   7,     KEY_RIGHT  },  //D RIGHT
-	
 	{   8,     KEY_ESC    },  //ESC
-	
 	{   9,     KEY_S      },  //START
-	
 	{  10,     KEY_Z      },  //SELECT
-	
 	{  11,     KEY_A      },  //A
-	
 	{  14,     KEY_B      },  //B
-	
 	{  17,     KEY_X      },  //X
-	
 	{  18,     KEY_Y      },  //Y
-	
 	{  22,     KEY_Q      },  //C UP 
-	
 	{  23,     KEY_W      },  //C DOWN
-	
 	{  24,     KEY_E      },  //C LEFT
-	
 	{  25,     KEY_R      },  //C RIGHT
-	
 	//{  27,     KEY_T      },  //Z 
-	
 	 {  28,     KEY_U      },  //L1
-   
 	 {  29,     KEY_I      },  //R1
-   
-	  //{  30,     KEY_O      },  //L2
-  
-  //{  31,     KEY_P      },  //R2
+	 //{  30,     KEY_O      },  //L2
+  	 //{  31,     KEY_P      },  //R2
