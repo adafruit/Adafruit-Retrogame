@@ -1,9 +1,9 @@
-EXECS = retrogame
+EXECS = gpiobtndriver
 CC    = gcc $(CFLAGS) -Wall -O3 -fomit-frame-pointer -funroll-loops -s
 
 all: $(EXECS)
 
-retrogame: retrogame.c
+retrogame: gpiobtndriver.c
 	$(CC) $< -o $@
 	strip $@
 
