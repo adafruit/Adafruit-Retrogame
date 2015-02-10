@@ -337,7 +337,7 @@ int main(int argc, char *argv[]) {
 	// ----------------------------------------------------------------
 	// Set up uinput
 
-#if 1
+#if 0  //setting to 0 MJB
 	// Retrogame normally uses /dev/uinput for generating key events.
 	// Cupcade requires this and it's the default.  SDL2 (used by
 	// some newer emulators) doesn't like it, wants /dev/input/event0
