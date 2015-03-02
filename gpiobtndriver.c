@@ -58,9 +58,9 @@ struct {
 	{   3,     KEY_DOWN   },  //D DOWN
 	{   4,     KEY_LEFT   },  //D LEFT
 	{   7,     KEY_RIGHT  },  //D RIGHT
-	{   8,     KEY_ESC    },  //ESC
+	{   8,     KEY_Z    },  //ESC
 	{   9,     KEY_S      },  //START
-	{  10,     KEY_Z      },  //SELECT
+	{  10,     KEY_ESC      },  //SELECT
 	{  11,     KEY_A      },  //A
 	{  14,     KEY_B      },  //B
 	{  17,     KEY_X      },  //X
