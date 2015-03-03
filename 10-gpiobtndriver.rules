@@ -1,0 +1,3 @@
+#For RetroPie 2.0+ support
+
+SUBSYSTEM=="input", ATTRS{name}=="gpiobtndriver", ENV{ID_INPUT_KEYBOARD}="1"

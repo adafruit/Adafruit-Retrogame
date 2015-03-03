@@ -1,15 +1,7 @@
 /*
-ADAFRUIT RETROGAME UTILITY: remaps buttons on Raspberry Pi GPIO header
-to virtual USB keyboard presses.  Great for classic game emulators!
-Retrogame is interrupt-driven and efficient (usually under 0.3% CPU use)
-and debounces inputs for glitch-free gaming.
+GpioBtnDriver
 
-Connect one side of button(s) to GND pin (there are several on the GPIO
-header, but see later notes) and the other side to GPIO pin of interest.
-Internal pullups are used; no resistors required.  Avoid pins 8 and 10;
-these are configured as a serial port by default on most systems (this
-can be disabled but takes some doing).  Pin configuration is currently
-set in global table; no config file yet.  See later comments.
+Maps GPIO Pins to Button Inputs
 
 Must be run as root, i.e. 'sudo ./retrogame &' or configure init scripts
 to launch automatically at system startup.
@@ -23,41 +15,6 @@ To enable, either type:
 Or, to make this persistent between reboots, add a line to /etc/modules:
 
     uinput
-
-Prior versions of this code, when being compiled for use with the Cupcade
-or PiGRRL projects, required CUPCADE to be #defined.  This is no longer
-the case; instead a test is performed to see if a PiTFT is connected, and
-one of two I/O tables is automatically selected.
-
-Written by Phil Burgess for Adafruit Industries, distributed under BSD
-License.  Adafruit invests time and resources providing this open source
-code, please support Adafruit and open-source hardware by purchasing
-products from Adafruit!
-
-
-Copyright (c) 2013 Adafruit Industries.
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-- Redistributions of source code must retain the above copyright notice,
-  this list of conditions and the following disclaimer.
-- Redistributions in binary form must reproduce the above copyright notice,
-  this list of conditions and the following disclaimer in the documentation
-  and/or other materials provided with the distribution.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <stdio.h>
@@ -88,38 +45,35 @@ struct {
 	int key;
 } *io, // In main() this pointer is set to one of the two tables below.
    ioTFT[] = {
-	// This pin/key table is used if an Adafruit PiTFT display
-	// is detected (e.g. Cupcade or PiGRRL).
-	// Input   Output (from /usr/include/linux/input.h)
-	{   2,     KEY_LEFT     },   // Joystick (4 pins)
-	{   3,     KEY_RIGHT    },
-	{   4,     KEY_DOWN     },
-	{  17,     KEY_UP       },
-	{  27,     KEY_Z        },   // A/Fire/jump/primary
-	{  22,     KEY_X        },   // B/Bomb/secondary
-	{  23,     KEY_R        },   // Credit
-	{  18,     KEY_Q        },   // Start 1P
+	// This pin/key table is used if an Adafruit PiTFT display so ignore it
+	{   2,     KEY_H     },   // Joystick (4 pins)
 	{  -1,     -1           } }, // END OF LIST, DO NOT CHANGE
-	// MAME must be configured with 'z' & 'x' as buttons 1 & 2 -
-	// this was required for the accompanying 'menu' utility to
-	// work (catching crtl/alt w/ncurses gets totally NASTY).
-	// Credit/start are likewise moved to 'r' & 'q,' reason being
-	// to play nicer with certain emulators not liking numbers.
-	// GPIO options are 'maxed out' with PiTFT + above table.
-	// If additional buttons are desired, will need to disable
-	// serial console and/or use P5 header.  Or use keyboard.
+
    ioStandard[] = {
 	// This pin/key table is used when the PiTFT isn't found
 	// (using HDMI or composite instead), as with our original
 	// retro gaming guide.
 	// Input   Output (from /usr/include/linux/input.h)
-	{  25,     KEY_LEFT     },   // Joystick (4 pins)
-	{   9,     KEY_RIGHT    },
-	{  10,     KEY_UP       },
-	{  17,     KEY_DOWN     },
-	{  23,     KEY_LEFTCTRL },   // A/Fire/jump/primary
-	{   7,     KEY_LEFTALT  },   // B/Bomb/secondary
-	// For credit/start/etc., use USB keyboard or add more buttons.
+	{   2,     KEY_UP     },  //D UP
+	{   3,     KEY_DOWN   },  //D DOWN
+	{   4,     KEY_LEFT   },  //D LEFT
+	{   7,     KEY_RIGHT  },  //D RIGHT
+	{   8,     KEY_Z      },  //ESC
+	{   9,     KEY_S      },  //START
+	{  10,     KEY_ESC    },  //SELECT
+	{  11,     KEY_A      },  //A
+	{  14,     KEY_B      },  //B
+	{  17,     KEY_X      },  //X
+	{  18,     KEY_Y      },  //Y
+	{  22,     KEY_Q      },  //C UP 
+	{  23,     KEY_W      },  //C DOWN
+	{  24,     KEY_E      },  //C LEFT
+	{  25,     KEY_R      },  //C RIGHT
+	//{  27,     KEY_T      },  //Z 
+        {  28,     KEY_U      },  //L1
+        {  29,     KEY_I      },  //R1
+        //{  30,     KEY_O      },  //L2
+        //{  31,     KEY_P      },  //R2
 	{  -1,     -1           } }; // END OF LIST, DO NOT CHANGE
 
 // A "Vulcan nerve pinch" (holding down a specific button combination
@@ -134,11 +88,11 @@ struct {
 // game menu using the 'gamera' utility; MAME disregards key repeat
 // events (as it should).
 const unsigned long vulcanMask = (1L << 6) | (1L << 7);
-const int           vulcanKey  = KEY_ESC, // Keycode to send
-                    vulcanTime = 1500,    // Pinch time in milliseconds
-                    repTime1   = 500,     // Key hold time to begin repeat
-                    repTime2   = 100;     // Time between key repetitions
-
+const int           vulcanKey  = KEY_G, // Keycode to send
+                    vulcanTime = 1000000,    // Pinch time in milliseconds
+                    repTime1   = 1000000,     // Key hold time to begin repeat
+                    repTime2   = 1000000;     // Time between key repetitions
+// MJB 2/6/2015 Setting values really high to avoid being used, will probably just strip it out eventuall
 
 // A few globals ---------------------------------------------------------
 
@@ -383,7 +337,7 @@ int main(int argc, char *argv[]) {
 	// ----------------------------------------------------------------
 	// Set up uinput
 
-#if 1
+#if 0  //setting to 0 MJB
 	// Retrogame normally uses /dev/uinput for generating key events.
 	// Cupcade requires this and it's the default.  SDL2 (used by
 	// some newer emulators) doesn't like it, wants /dev/input/event0
