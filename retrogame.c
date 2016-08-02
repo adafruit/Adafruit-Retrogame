@@ -89,7 +89,8 @@ struct {
 } *io, // In main() this pointer is set to one of the two tables below.
    ioTFT[] = {
 	// This pin/key table is used if an Adafruit PiTFT display
-	// is detected (e.g. Cupcade or PiGRRL).
+	// is detected using the 'classic' methodology (e.g. Cupcade
+	// or PiGRRL 1 -- NOT PiGRRL 2).
 	// Input   Output (from /usr/include/linux/input.h)
 	{   2,     KEY_LEFT     },   // Joystick (4 pins)
 	{   3,     KEY_RIGHT    },
@@ -110,8 +111,11 @@ struct {
 	// serial console and/or use P5 header.  Or use keyboard.
    ioStandard[] = {
 	// This pin/key table is used when the PiTFT isn't found
-	// (using HDMI or composite instead), as with our original
-	// retro gaming guide.
+	// (using HDMI or composite instead), or with newer projects
+	// such as PiGRRL 2 that "fake out" HDMI and copy it to the
+	// PiTFT screen.
+#if 0
+	// From our original Pi gaming guide:
 	// Input   Output (from /usr/include/linux/input.h)
 	{  25,     KEY_LEFT     },   // Joystick (4 pins)
 	{   9,     KEY_RIGHT    },
@@ -120,6 +124,26 @@ struct {
 	{  23,     KEY_LEFTCTRL },   // A/Fire/jump/primary
 	{   7,     KEY_LEFTALT  },   // B/Bomb/secondary
 	// For credit/start/etc., use USB keyboard or add more buttons.
+#else
+	// For PiGRRL 2:
+	// Input   Output (from /usr/include/linux/input.h)
+	{   4,     KEY_LEFT     }, // Joystick (4 pins)
+	{  19,     KEY_RIGHT    },
+	{  16,     KEY_UP       },
+	{  26,     KEY_DOWN     },
+	{  14,     KEY_LEFTCTRL }, // A/Fire/jump/primary/RED
+	{  15,     KEY_LEFTALT  }, // B/Bomb/secondary/YELLOW
+	{  20,     KEY_Z        }, // X/BLUE
+	{  18,     KEY_X        }, // Y/GREEN
+	{   5,     KEY_SPACE    }, // Select
+	{   6,     KEY_ENTER    }, // Start
+	{  12,     KEY_A        }, // L Shoulder
+	{  13,     KEY_S        }, // R Shoulder
+	{  17,     KEY_ESC      }, // Exit ROM PiTFT Button 1
+	{  22,     KEY_1        }, // PiTFT Button 2
+	{  23,     KEY_2        }, // PiTFT Button 3
+	{  27,     KEY_3        }, // PiTFT Button 4
+#endif
 	{  -1,     -1           } }; // END OF LIST, DO NOT CHANGE
 
 // A "Vulcan nerve pinch" (holding down a specific button combination
@@ -270,7 +294,7 @@ int main(int argc, char *argv[]) {
 	char                   buf[50],      // For sundry filenames
 	                       c,            // Pin input value ('0'/'1')
 	                       board;        // 0=Pi1Rev1, 1=Pi1Rev2, 2=Pi2
-	int                    fd,           // For mmap, sysfs, uinput
+	int                    fd, fd2,      // For mmap, sysfs, uinput
 	                       i, j,         // Asst. counter
 	                       bitmask,      // Pullup enable bitmask
 	                       timeout = -1, // poll() timeout
@@ -383,11 +407,8 @@ int main(int argc, char *argv[]) {
 	// ----------------------------------------------------------------
 	// Set up uinput
 
-#if 1
-	// Retrogame normally uses /dev/uinput for generating key events.
-	// Cupcade requires this and it's the default.  SDL2 (used by
-	// some newer emulators) doesn't like it, wants /dev/input/event0
-	// instead.  Enable that code by changing to "#if 0" above.
+	// Traditionally we've used /dev/uinput for generating key events,
+	// but see notes below....
 	if((fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK)) < 0)
 		err("Can't open /dev/uinput");
 	if(ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0)
@@ -410,10 +431,19 @@ int main(int argc, char *argv[]) {
 		err("write failed");
 	if(ioctl(fd, UI_DEV_CREATE) < 0)
 		err("DEV_CREATE failed");
-#else // SDL2 prefers this event methodology
-	if((fd = open("/dev/input/event0", O_WRONLY | O_NONBLOCK)) < 0)
-		err("Can't open /dev/input/event0");
-#endif
+
+	// SDL2 (used by some newer emulators) wants /dev/input/event0
+	// instead -- BUT -- this is the odd thing, and I don't fully
+	// understand the why -- event0 only exists if a physical USB
+	// keyboard has been connected, OR IF /dev/uinput in the code
+	// above has been opened and set up.  Skip the prior steps and
+	// it won't happen (this wasn't necessary in earlier versions,
+	// could just go right to this step for SDL2, so not sure what's
+	// up).  Since we might be running on an earlier system, we'll
+	// start with uinput by default, then override the value of fd
+	// only *if* event0 exists, should cover both cases.
+	if((fd2 = open("/dev/input/event0", O_WRONLY | O_NONBLOCK)) >= 0)
+		fd = fd2; // Override fd; write to event0 instead
 
 	// Initialize input event structures
 	memset(&keyEv, 0, sizeof(keyEv));
