@@ -67,7 +67,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <dirent.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
 
@@ -166,8 +168,10 @@ const int           vulcanKey  = KEY_ESC, // Keycode to send
 
 // A few globals ---------------------------------------------------------
 
+extern char
+  *__progname,                       // Program name (for error reporting)
+  *program_invocation_name;          // Full name as invoked (path, etc.)
 char
-  *progName,                         // Program name (for error reporting)
    sysfs_root[] = "/sys/class/gpio", // Location of Sysfs GPIO files
    running      = 1;                 // Signal handler will set to 0 (exit)
 volatile unsigned int
@@ -211,7 +215,8 @@ void cleanup() {
 
 // Quick-n-dirty error reporter; print message, clean up and exit.
 void err(char *msg) {
-	printf("%s: %s.  Try 'sudo %s'.\n", progName, msg, progName);
+	printf("%s: %s.  Try 'sudo %s'.\n", __progname, msg,
+	  program_invocation_name);
 	cleanup();
 	exit(1);
 }
@@ -274,6 +279,33 @@ static int boardType(void) {
 	return board;
 }
 
+// Filter function for scandir(), identifies possible device candidates
+// for simulated keypress events (separate from actual USB keyboard(s)).
+static int filter1(const struct dirent *d) {
+	if(!strncmp(d->d_name, "input", 5)) { // Name usu. 'input' + #
+		// Read contents of 'name' file inside this subdirectory,
+		// if it matches the retrogame executable, that's probably
+		// the device we want...
+		char  filename[100], line[100];
+		FILE *fp;
+		sprintf(filename, "/sys/devices/virtual/input/%s/name",
+		  d->d_name);
+		memset(line, 0, sizeof(line));
+		if((fp = fopen(filename, "r"))) {
+			fgets(line, sizeof(line), fp);
+			fclose(fp);
+		}
+		if(!strncmp(line, __progname, strlen(__progname))) return 1;
+	}
+
+        return 0;
+}
+
+// A second scandir() filter, checks for filename of 'event' + #
+static int filter2(const struct dirent *d) {
+	return !strncmp(d->d_name, "event", 5);
+}
+
 // Main stuff ------------------------------------------------------------
 
 #define PI1_BCM2708_PERI_BASE 0x20000000
@@ -306,7 +338,6 @@ int main(int argc, char *argv[]) {
 	struct input_event     keyEv, synEv; // uinput events
 	struct pollfd          p[32];        // GPIO file descriptors
 
-	progName = argv[0];             // For error reporting
 	signal(SIGINT , signalHandler); // Trap basic signals (exit cleanly)
 	signal(SIGKILL, signalHandler);
 
@@ -432,18 +463,72 @@ int main(int argc, char *argv[]) {
 	if(ioctl(fd, UI_DEV_CREATE) < 0)
 		err("DEV_CREATE failed");
 
-	// SDL2 (used by some newer emulators) wants /dev/input/event0
+	// SDL2 (used by some newer emulators) wants /dev/input/eventX
 	// instead -- BUT -- this is the odd thing, and I don't fully
-	// understand the why -- event0 only exists if a physical USB
+	// understand the why -- eventX only exists if a physical USB
 	// keyboard has been connected, OR IF /dev/uinput in the code
 	// above has been opened and set up.  Skip the prior steps and
 	// it won't happen (this wasn't necessary in earlier versions,
 	// could just go right to this step for SDL2, so not sure what's
 	// up).  Since we might be running on an earlier system, we'll
 	// start with uinput by default, then override the value of fd
-	// only *if* event0 exists, should cover both cases.
-	if((fd2 = open("/dev/input/event0", O_WRONLY | O_NONBLOCK)) >= 0)
-		fd = fd2; // Override fd; write to event0 instead
+	// only *if* eventX exists, should cover both cases.
+
+	// The 'X' in eventX is a unique identifier (typically a numeric
+	// digit or two) for each input device, dynamically assigned as
+	// USB input devices are plugged in or disconnected (or when the
+	// above code in retrogame runs).  As it's dynamically assigned,
+	// we can't rely on a fixed number -- it will vary if there's a
+	// keyboard connected when the program starts.
+
+
+	struct dirent **namelist;
+	int             n;
+	char            evName[100] = "";
+
+	if((n = scandir("/sys/devices/virtual/input",
+	  &namelist, filter1, NULL)) > 0) {
+		// Got a list of device(s).  In theory there should
+		// be only one that makes it through the filter (name
+		// matches retrogame)...if there's multiples, only
+		// the first is used.  (namelist can then be freed)
+		char path[100];
+		sprintf(path, "/sys/devices/virtual/input/%s",
+		  namelist[0]->d_name);
+		for(i=0; i<n; i++) free(namelist[i]);
+		free(namelist);
+		// Within the given device path should be subpath with
+		// the name 'eventX' (X varies), again theoretically
+		// should be only one, first in list is used.
+		if((n = scandir(path, &namelist, filter2, NULL)) > 0) {
+			sprintf(evName, "/dev/input/%s",
+			  namelist[0]->d_name);
+			for(i=0; i<n; i++) free(namelist[i]);
+			free(namelist);
+		}
+	}
+
+	if(!evName[0]) { // Nothing found?  Use fallback method...
+		// Kinda lazy skim for last item in /dev/input/event*
+		// This is NOT guaranteed to be retrogame, but if the
+		// above method fails for some reason, this may be
+		// adequate.  If there's a USB keyboard attached at
+		// boot, it usually instantiates in /dev/input before
+		// retrogame, so even if it's then removed, the index
+		// assigned to retrogame stays put...thus the last
+		// index mmmmight be what we need.
+		char        name[32];
+		struct stat st;
+		for(i=99; i>=0; i--) {
+			sprintf(name, "/dev/input/event%d", i);
+			if(!stat(name, &st)) break; // last valid device
+		}
+		strcpy(evName, (i >= 0) ? name : "/dev/input/event0");
+	}
+
+
+	if((fd2 = open(evName, O_WRONLY | O_NONBLOCK)) >= 0)
+		fd = fd2; // Override fd; write to eventX instead
 
 	// Initialize input event structures
 	memset(&keyEv, 0, sizeof(keyEv));
