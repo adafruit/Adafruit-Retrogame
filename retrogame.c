@@ -70,6 +70,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <dirent.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/signalfd.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
 
@@ -221,11 +222,6 @@ void err(char *msg) {
 	exit(1);
 }
 
-// Interrupt handler -- set global flag to abort main loop.
-void signalHandler(int n) {
-	running = 0;
-}
-
 // Detect Pi board type.  Doesn't return super-granular details,
 // just the most basic distinction needed for GPIO compatibility:
 // 0: Pi 1 Model B revision 1
@@ -327,7 +323,7 @@ int main(int argc, char *argv[]) {
 	                       c,            // Pin input value ('0'/'1')
 	                       board;        // 0=Pi1Rev1, 1=Pi1Rev2, 2=Pi2
 	int                    fd, fd2,      // For mmap, sysfs, uinput
-	                       i, j,         // Asst. counter
+	                       i, j, j3,     // Asst. counter
 	                       bitmask,      // Pullup enable bitmask
 	                       timeout = -1, // poll() timeout
 	                       intstate[32], // Last-read state
@@ -336,10 +332,31 @@ int main(int argc, char *argv[]) {
 	unsigned long          bitMask, bit; // For Vulcan pinch detect
 	volatile unsigned char shortWait;    // Delay counter
 	struct input_event     keyEv, synEv; // uinput events
-	struct pollfd          p[32];        // GPIO file descriptors
+	struct pollfd          p[35];        // File descriptors for poll()
+	sigset_t               sigset;       // Signal mask
 
-	signal(SIGINT , signalHandler); // Trap basic signals (exit cleanly)
-	signal(SIGKILL, signalHandler);
+	// Catch all signal types so GPIO cleanup on exit is possible
+	sigfillset(&sigset);
+	sigprocmask(SIG_BLOCK, &sigset, NULL);
+	// pollfd #0 is for catching signals...
+	p[0].fd      = signalfd(-1, &sigset, 0);
+	p[0].events  = POLLIN | POLLERR | POLLHUP;
+	p[0].revents = 0;
+
+	// pollfd #1 and #2 will be used for detecting changes in the
+	// config file and its parent directory.  Config files ARE NOT
+	// YET IMPLEMENTED, but I'm working toward this incrementally.
+	// This change detection will let you edit the config and have
+	// immediate feedback without needing to kill the process or
+	// reboot the system.
+	p[1].fd     = -1;
+	p[1].events =  0;
+	p[2].fd     = -1;
+	p[2].events =  0;
+
+	// p[0-2] NEVER CHANGE for the remainder of the application's
+	// lifetime.  p[3...n] are then related to GPIO states, and will
+	// be reconfigured each time the config file is loaded (to-do).
 
 	// Select io[] table for Cupcade (TFT) or 'normal' project.
 	io = (access("/etc/modprobe.d/adafruit.conf", F_OK) ||
@@ -390,14 +407,13 @@ int main(int argc, char *argv[]) {
 	gpio[GPPUDCLK0] = 0;
 	(void)munmap((void *)gpio, BLOCK_SIZE); // Done with GPIO mmap()
 
-
 	// ----------------------------------------------------------------
 	// All other GPIO config is handled through the sysfs interface.
 
 	sprintf(buf, "%s/export", sysfs_root);
 	if((fd = open(buf, O_WRONLY)) < 0) // Open Sysfs export file
 		err("Can't open GPIO export file");
-	for(i=j=0; io[i].pin >= 0; i++) { // For each pin of interest...
+	for(i=0,j=3; io[i].pin >= 0; i++) { // For each pin of interest...
 		sprintf(buf, "%d", io[i].pin);
 		write(fd, buf, strlen(buf));             // Export pin
 		pinConfig(io[i].pin, "active_low", "0"); // Don't invert
@@ -423,15 +439,16 @@ int main(int argc, char *argv[]) {
 			// to the intstate[] and extstate[] arrays.
 			if((p[j].fd = open(buf, O_RDONLY)) < 0)
 				err("Can't access pin value");
-			intstate[j] = 0;
+			j3 = j - 3; // Signal fds occupy first 3 slots
+			intstate[j3] = 0;
 			if((read(p[j].fd, &c, 1) == 1) && (c == '0'))
-				intstate[j] = 1;
-			extstate[j] = intstate[j];
+				intstate[j3] = 1;
+			extstate[j3] = intstate[j3];
 			p[j].events  = POLLPRI; // Set up poll() events
 			p[j].revents = 0;
 			j++;
 		}
-	} // 'j' is now count of non-GND items in io[] table
+	} // 'j' is now count of non-GND items in io[] table + 3 fds
 	close(fd); // Done exporting
 
 
@@ -549,21 +566,57 @@ int main(int argc, char *argv[]) {
 	while(running) { // Signal handler can set this to 0 to exit
 		// Wait for IRQ on pin (or timeout for button debounce)
 		if(poll(p, j, timeout) > 0) { // If IRQ...
-			for(i=0; i<j; i++) {       // Scan non-GND pins...
+			// Scan backwards so buttons have top priority
+			// (first three elements of p[] are for signals,
+			// OK if these are handled less quickly).
+			for(i=j-1; i>=0; i--) { // From last non-GND to 0
 				if(p[i].revents) { // Event received?
-					// Read current pin state, store
-					// in internal state flag, but
-					// don't issue to uinput yet --
-					// must wait for debounce!
-					lseek(p[i].fd, 0, SEEK_SET);
-					read(p[i].fd, &c, 1);
-					if(c == '0')      intstate[i] = 1;
-					else if(c == '1') intstate[i] = 0;
-					p[i].revents = 0; // Clear flag
+					if(i > 2) { // Is a button
+						timeout = debounceTime;
+						// Read current pin state,
+						// store in internal state
+						// flag, but don't issue to
+						// uinput yet -- must wait
+						// for debounce!
+						lseek(p[i].fd, 0, SEEK_SET);
+						read(p[i].fd, &c, 1);
+						if(c == '0')
+							intstate[i-3] = 1;
+						else if(c == '1')
+							intstate[i-3] = 0;
+					} else { // Is a signal
+						timeout = -1;
+						if(i == 0) {
+							struct
+							  signalfd_siginfo
+							  info;
+							read(p[0].fd, &info,
+							  sizeof(info));
+							if(info.ssi_signo ==
+							  SIGHUP) {
+								// Reload
+								// config
+								printf(
+								  "SIGHUP\n");
+							} else {
+								// Other
+								// signal --
+								// abort
+								// program
+								running = 0;
+							}
+						} else if(i == 1) {
+							// File change,
+							// reload config
+						} else {
+							// Directory change,
+							// maybe reload config
+						}
+					}
+					p[i].revents = 0;
 				}
 			}
-			timeout = debounceTime; // Set timeout for debounce
-			c       = 0;            // Don't issue SYN event
+			c = 0; // Don't issue SYN event
 			// Else timeout occurred
 		} else if(timeout == debounceTime) { // Button debounce timeout
 			// 'j' (number of non-GNDs) is re-counted as
@@ -601,6 +654,7 @@ int main(int argc, char *argv[]) {
 					if(intstate[i]) bitMask |= bit;
 				}
 			}
+			j += 3; // Signal fds occupy first 3 slots of p[]
 
 			// If the "Vulcan nerve pinch" buttons are pressed,
 			// set long timeout -- if this time elapses without
