@@ -155,14 +155,14 @@ struct {
 // for a few seconds) issues an 'esc' keypress to MAME (which brings up
 // an exit menu or quits the current game).  The button combo is
 // configured with a bitmask corresponding to elements in the above io[]
-// array.  The default value here uses elements 6 and 7 (credit and start
-// in the Cupcade pinout).  If you change this, make certain it's a combo
-// that's not likely to occur during actual gameplay (i.e. avoid using
-// joystick directions or hold-for-rapid-fire buttons).
+// array.  The default value here uses GPIO pins 23 and 18 (credit and
+// start in the Cupcade pinout).  If you change this, make certain it's
+// a combo that's not likely to occur during actual gameplay (i.e. avoid
+// using joystick directions or hold-for-rapid-fire buttons).
 // Also key auto-repeat times are set here.  This is for navigating the
 // game menu using the 'gamera' utility; MAME disregards key repeat
 // events (as it should).
-const unsigned long vulcanMask = (1L << 6) | (1L << 7);
+const unsigned long vulcanMask = (1L << 23) | (1L << 18);
 const int           vulcanKey  = KEY_ESC, // Keycode to send
                     vulcanTime = 1500,    // Pinch time in milliseconds
                     repTime1   = 500,     // Key hold time to begin repeat
@@ -194,7 +194,6 @@ int
    keyfd2 = -1,                      // /dev/input/eventX file descriptor
    keyfd  = -1;                      // = (keyfd2 >= 0) ? keyfd2 : keyfd1;
 
-
 #define PI1_BCM2708_PERI_BASE 0x20000000
 #define PI1_GPIO_BASE         (PI1_BCM2708_PERI_BASE + 0x200000)
 #define PI2_BCM2708_PERI_BASE 0x3F000000
@@ -217,14 +216,33 @@ static int pinSetup(int pin, char *attr, char *value) {
 	return (w != len); // 0 = success
 }
 
+// Set GPIO pull up/down/none
+static void pull(int bitmask, int state) {
+	volatile unsigned char shortWait;
+	gpio[GPPUD]     = state;         // 2=up, 1=down, 0=none
+	for(shortWait=150;--shortWait;); // Min 150 cycle wait
+	gpio[GPPUDCLK0] = bitmask;       // Set pullup mask
+	for(shortWait=150;--shortWait;); // Wait again
+	gpio[GPPUD]     = 0;             // Reset pullup registers
+	gpio[GPPUDCLK0] = 0;
+}
+
 // Restore GPIO to startup state; un-export any Sysfs pins used, don't
 // leave any filesystem cruft.  Also restores any GND pins to inputs and
 // disables previously-set pull-ups.  Write errors are ignored as pins
 // may be in a partially-initialized state.
 static void unloadPinConfig() {
-	char                   buf[50];
-	int                    fd, i, bitmask;
-	volatile unsigned char shortWait;
+	char buf[50];
+	int  fd, i, j, bitmask;
+
+	for(i=0; i<32; i++) {
+		if(p[i].fd >= 0) {
+			close(p[i].fd);
+			p[i].fd = -1;
+			intstate[i] = extstate[i] = 0;
+		}
+		p[i].events = p[i].revents = 0;
+	}
 
 	keyfd = -1;
 	if(keyfd2 >= 0) {
@@ -251,14 +269,9 @@ static void unloadPinConfig() {
 	}
 
 	// Disable any previously-set pullups...
-	for(bitmask=i=0; io[i].pin >= 0; i++) // Bitmap of pullip pins
-		if(io[i].key != GND) bitmask |= (1 << io[i].pin);
-	gpio[GPPUD]     = 0;                  // Disable pullup
-	for(shortWait=150;--shortWait;);      // Min 150 cycle wait
-	gpio[GPPUDCLK0] = bitmask;            // Set pullup mask
-	for(shortWait=150;--shortWait;);      // Wait again
-	gpio[GPPUD]     = 0;                  // Reset pullup registers
-	gpio[GPPUDCLK0] = 0;
+	for(bitmask=i=0; (j=io[i].pin) >= 0; i++) // Bitmap of pullup pins
+		if(io[i].key != GND) bitmask |= (1 << j);
+	pull(bitmask, 0); // Disable pullups
 }
 
 // Quick-n-dirty error reporter; print message, clean up and exit.
@@ -307,63 +320,47 @@ static int dictSearch(char *str, dict *d) {
 
 // Load pin/key configuration.  Right now this uses the io[] table,
 // eventual plan is to have a configuration file.  Not there yet.
-static int loadPinConfig() {
+static void loadPinConfig() {
 
-	char                   c, buf[50];
-	int                    i, j, j3, fd, bitmask;
-	volatile unsigned char shortWait;
+	char c, buf[50];
+	int  i, j, fd, bitmask;
 
 	// Make combined bitmap of pullup-enabled pins:
-	for(bitmask=i=0; io[i].pin >= 0; i++)
-		if(io[i].key != GND) bitmask |= (1 << io[i].pin);
-	gpio[GPPUD]     = 2;             // Enable pullup
-	for(shortWait=150;--shortWait;); // Min 150 cycle wait
-	gpio[GPPUDCLK0] = bitmask;       // Set pullup mask
-	for(shortWait=150;--shortWait;); // Wait again
-	gpio[GPPUD]     = 0;             // Reset pullup registers
-	gpio[GPPUDCLK0] = 0;
+	for(bitmask=i=0; (j=io[i].pin) >= 0; i++)
+		if(io[i].key != GND) bitmask |= (1 << j);
+	pull(bitmask, 2); // Enable pullups
 
 	// All other GPIO config is handled through the sysfs interface.
 
 	sprintf(buf, "%s/export", sysfs_root);
 	if((fd = open(buf, O_WRONLY)) < 0) // Open Sysfs export file
 		err("Can't open GPIO export file");
-	for(i=0,j=3; io[i].pin >= 0; i++) { // For each pin of interest...
-		sprintf(buf, "%d", io[i].pin);
-		write(fd, buf, strlen(buf));             // Export pin
-		pinSetup(io[i].pin, "active_low", "0"); // Don't invert
+	for(i=0; (j=io[i].pin) >= 0; i++) { // For each pin of interest...
+		sprintf(buf, "%d", j);
+		write(fd, buf, strlen(buf));    // Export pin
+		pinSetup(j, "active_low", "0"); // Don't invert
 		if(io[i].key == GND) {
 			// Set pin to output, value 0 (ground)
-			if(pinSetup(io[i].pin, "direction", "out") ||
-			   pinSetup(io[i].pin, "value"    , "0"))
+			if(pinSetup(j, "direction", "out") ||
+			   pinSetup(j, "value"    , "0"))
 				err("Pin config failed (GND)");
 		} else {
 			// Set pin to input, detect rise+fall events
-			if(pinSetup(io[i].pin, "direction", "in") ||
-			   pinSetup(io[i].pin, "edge"     , "both"))
+			if(pinSetup(j, "direction", "in") ||
+			   pinSetup(j, "edge"     , "both"))
 				err("Pin config failed");
 			// Get initial pin value
-			sprintf(buf, "%s/gpio%d/value",
-			  sysfs_root, io[i].pin);
-			// The p[] file descriptor array isn't necessarily
-			// aligned with the io[] array.  GND keys in the
-			// latter are skipped, but p[] requires contiguous
-			// entries for poll().  So the pins to monitor are
-			// at the head of p[], and there may be unused
-			// elements at the end for each GND.  Same applies
-			// to the intstate[] and extstate[] arrays.
+			sprintf(buf, "%s/gpio%d/value", sysfs_root, j);
 			if((p[j].fd = open(buf, O_RDONLY)) < 0)
 				err("Can't access pin value");
-			j3 = j - 3; // Signal fds occupy first 3 slots
-			intstate[j3] = 0;
+			intstate[j] = 0;
 			if((read(p[j].fd, &c, 1) == 1) && (c == '0'))
-				intstate[j3] = 1;
-			extstate[j3] = intstate[j3];
+				intstate[j] = 1;
+			extstate[j] = intstate[j];
 			p[j].events  = POLLPRI; // Set up poll() events
 			p[j].revents = 0;
-			j++;
 		}
-	} // 'j' is now count of non-GND items in io[] table + 3 fds
+	}
 	close(fd); // Done exporting
 
 	// Set up uinput
@@ -452,8 +449,6 @@ static int loadPinConfig() {
 
 	keyfd2 = open(evName, O_WRONLY | O_NONBLOCK);
 	keyfd  = (keyfd2 >= 0) ? keyfd2 : keyfd1;
-
-	return j; // Max used index in p[] array
 }
 
 // Detect Pi board type.  Doesn't return super-granular details,
@@ -509,22 +504,21 @@ static int boardType(void) {
 	return board;
 }
 
-// Handle signal events (0), config file change events (1) or
-// config directory contents change events (2).
+// Handle signal events (32), config file change events (33) or
+// config directory contents change events (34).
 // CONFIGURATION FILES AREN'T YET IMPLEMENTED, but this is a vital
 // part of that, monitoring for config changes so new settings can
 // be loaded synamically without a kill/restart/whatev.
-static int pollHandler(int i) {
-	int r = -1;
+static void pollHandler(int i) {
 
-	if(i == 0) { // Signal event
+	if(i == 32) { // Signal event
 		struct signalfd_siginfo info;
-		read(p[0].fd, &info, sizeof(info));
+		read(p[i].fd, &info, sizeof(info));
 		if(info.ssi_signo == SIGHUP) { // kill -1 = force reload
 			printf("SIGHUP\n");
 			// Reload config
 			unloadPinConfig();
-			r = loadPinConfig();
+			loadPinConfig();
 		} else { // Other signal = abort program
 			running = 0;
 		}
@@ -545,7 +539,7 @@ static int pollHandler(int i) {
 			if(ev->mask & IN_MODIFY) {
 				puts("\tConfig file changed (reloading)");
 				unloadPinConfig();
-				r = loadPinConfig();
+				loadPinConfig();
 			} else if(ev->mask & IN_IGNORED) {
 				// Config file deleted -- stop watching it
 				puts("\tConfig file removed");
@@ -554,9 +548,9 @@ static int pollHandler(int i) {
 				// important, as removing the watch itself
 				// creates another IN_IGNORED event.
 				// Avoids turtles all the way down.
-				close(p[1].fd);
-				p[1].fd     = -1;
-				p[1].events =  0;
+				close(p[33].fd);
+				p[33].fd     = -1;
+				p[33].events =  0;
 				// Pin config is NOT unloaded...
 				// keep using prior values for now.
 			} else if(ev->mask & IN_MOVED_FROM) {
@@ -566,10 +560,10 @@ static int pollHandler(int i) {
 				if(!strcmp(ev->name, cfgName)) {
 					// It's our file -- stop watching it
 					puts("\tEffectively removed");
-					inotify_rm_watch(p[1].fd, fileWatch);
-					close(p[1].fd);
-					p[1].fd     = -1;
-					p[1].events =  0;
+					inotify_rm_watch(p[33].fd, fileWatch);
+					close(p[33].fd);
+					p[33].fd     = -1;
+					p[33].events =  0;
 					// Pin config is NOT unloaded...
 					// keep using prior values for now.
 				} else {
@@ -583,18 +577,18 @@ static int pollHandler(int i) {
 				if(!strcmp(ev->name, cfgName)) {
 					// It's our file -- start watching it!
 					puts("\tFile created/moved-to!");
-					if(p[1].fd >= 0) { // Existing file?
+					if(p[33].fd >= 0) { // Existing file?
 						inotify_rm_watch(
-						  p[1].fd, fileWatch);
-						close(p[1].fd);
+						  p[33].fd, fileWatch);
+						close(p[33].fd);
 					}
-					p[1].fd   = inotify_init();
+					p[33].fd   = inotify_init();
 					fileWatch = inotify_add_watch(
-					  p[1].fd, cfgPathname,
+					  p[33].fd, cfgPathname,
 					  IN_MODIFY | IN_IGNORED);
-					p[1].events = POLLIN;
+					p[33].events = POLLIN;
 					unloadPinConfig();
-					r = loadPinConfig();
+					loadPinConfig();
 				} else {
 					// Some other file -- disregard
 					puts("\tNot the config file.");
@@ -604,8 +598,6 @@ static int pollHandler(int i) {
 			bufPos += sizeof(struct inotify_event) + ev->len;
 		}
 	}
-
-	return r; // -1 if no change to config file, else max p[] index
 }
 
 
@@ -624,9 +616,14 @@ int main(int argc, char *argv[]) {
 	                       i, j,         // Asst. counter
 	                       timeout = -1, // poll() timeout
 	                       lastKey = -1; // Last key down (for repeat)
-	unsigned long          bitMask, bit; // For Vulcan pinch detect
+	unsigned long          bitMask;      // For Vulcan pinch detect
 	struct input_event     keyEv, synEv; // uinput events
 	sigset_t               sigset;       // Signal mask
+
+	memset(p, 0, sizeof(p));
+	memset(intstate, 0, sizeof(intstate));
+	memset(extstate, 0, sizeof(extstate));
+	for(i=0; i<35; i++) p[i].fd = -1;
 
 	if(argc > 1) { // First argument (if given) is config file name
 		char *ptr = strrchr(argv[1], '/'); // Full pathname given?
@@ -664,32 +661,29 @@ int main(int argc, char *argv[]) {
 	// Catch all signal types so GPIO cleanup on exit is possible
 	sigfillset(&sigset);
 	sigprocmask(SIG_BLOCK, &sigset, NULL);
-	// pollfd #0 is for catching signals...
-	p[0].fd      = signalfd(-1, &sigset, 0);
-	p[0].events  = POLLIN;
-	p[0].revents = 0;
+	// pollfd #32 is for catching signals...
+	p[32].fd     = signalfd(-1, &sigset, 0);
+	p[32].events = POLLIN;
 
-	// pollfd #1 and #2 will be used for detecting changes in the
+	// pollfd #33 and #34 will be used for detecting changes in the
 	// config file and its parent directory.  Config files ARE NOT
 	// YET IMPLEMENTED, but I'm working toward this incrementally.
 	// This change detection will let you edit the config and have
 	// immediate feedback without needing to kill the process or
 	// reboot the system.
 
-	for(i=1; i<=2; i++) {
-		p[i].fd      = inotify_init();
-		p[i].events  = POLLIN;
-		p[i].revents = 0;
+	for(i=33; i<=34; i++) {
+		p[i].fd     = inotify_init();
+		p[i].events = POLLIN;
 	}
 
-	fileWatch = inotify_add_watch(p[1].fd, cfgPathname,
+	fileWatch = inotify_add_watch(p[33].fd, cfgPathname,
 	  IN_MODIFY | IN_IGNORED);
-	inotify_add_watch(p[2].fd, cfgPath,
+	inotify_add_watch(p[34].fd, cfgPath,
 	  IN_CREATE | IN_MOVED_FROM | IN_MOVED_TO);
 
-	// p[0-2] NEVER CHANGE for the remainder of the application's
-	// lifetime.  p[3...n] are then related to GPIO states, and will
-	// be reconfigured each time the config file is loaded (to-do).
+	// p[0-31] are related to GPIO states, and will be reconfigured
+	// each time the (to-do) config file is loaded.
 
 	// Select io[] table for Cupcade (TFT) or 'normal' project.
 	io = (access("/etc/modprobe.d/adafruit.conf", F_OK) ||
@@ -737,7 +731,7 @@ int main(int argc, char *argv[]) {
 	synEv.code  = SYN_REPORT;
 	synEv.value = 0;
 
-	j = loadPinConfig();
+	loadPinConfig();
 
 
 	// ----------------------------------------------------------------
@@ -747,15 +741,8 @@ int main(int argc, char *argv[]) {
 
 	while(running) { // Signal handler can set this to 0 to exit
 		// Wait for IRQ on pin (or timeout for button debounce)
-		if(poll(p, j, timeout) > 0) { // If IRQ...
-			for(i=0; i<3; i++) {  // Check signals, etc.
-				if(p[i].revents) { // Event received?
-					int x = pollHandler(i);
-					if(x >= 0) j = x;
-					p[i].revents = 0;
-				}
-			}
-			for(; i<j; i++) { // Continue to last non-GND
+		if(poll(p, 35, timeout) > 0) { // If IRQ...
+			for(i=0; i<32; i++) { // Each GPIO bit...
 				if(p[i].revents) { // Event received?
 					timeout = debounceTime;
 					// Read current pin state,
@@ -765,20 +752,22 @@ int main(int argc, char *argv[]) {
 					// for debounce!
 					lseek(p[i].fd, 0, SEEK_SET);
 					read(p[i].fd, &c, 1);
-					if(c == '0')      intstate[i-3] = 1;
-					else if(c == '1') intstate[i-3] = 0;
+					if(c == '0')      intstate[i] = 1;
+					else if(c == '1') intstate[i] = 0;
+					p[i].revents = 0;
+				}
+			}
+			for(; i<35; i++) { // Check signals, etc.
+				if(p[i].revents) { // Event received?
+					pollHandler(i);
 					p[i].revents = 0;
 				}
 			}
 			c = 0; // Don't issue SYN event
 			// Else timeout occurred
 		} else if(timeout == debounceTime) { // Button debounce timeout
-			// 'j' (number of non-GNDs) is re-counted as
-			// it's easier than maintaining an additional
-			// remapping table or a duplicate key[] list.
 			bitMask = 0L; // Mask of buttons currently pressed
-			bit     = 1L;
-			for(c=i=j=0; io[i].pin >= 0; i++, bit<<=1) {
+			for(c=i=0; (j=io[i].pin) >= 0; i++) {
 				if(io[i].key != GND) {
 					// Compare internal state against
 					// previously-issued value.  Send
@@ -804,11 +793,9 @@ int main(int argc, char *argv[]) {
 							lastKey = timeout = -1;
 						}
 					}
-					j++;
-					if(intstate[i]) bitMask |= bit;
+					if(intstate[j]) bitMask |= (1 << j);
 				}
 			}
-			j += 3; // Signal fds occupy first 3 slots of p[]
 
 			// If the "Vulcan nerve pinch" buttons are pressed,
 			// set long timeout -- if this time elapses without

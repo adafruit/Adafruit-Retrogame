@@ -8,6 +8,6 @@ echo "\tint   value;"
 echo "} dict;"
 echo
 echo "dict keyTable[] = {"
-grep '#define* KEY_' $1 | awk '{ print "\t{ \"" $2 "\", " $2 " }," }'
+grep '#define* KEY_' $1 | awk '{ print "\t{ \"" substr($2,5) "\", " $2 " }," }'
 echo "\t{ NULL, -1 } // END-OF-LIST"
 echo "};"
