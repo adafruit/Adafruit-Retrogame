@@ -1,33 +1,24 @@
 /*
-ADAFRUIT RETROGAME UTILITY: remaps buttons on Raspberry Pi GPIO header
-to virtual USB keyboard presses.  Great for classic game emulators!
-Retrogame is interrupt-driven and efficient (typically < 0.3% CPU use,
-even w/heavy button-mashing) and debounces inputs for glitch-free gaming.
+ADAFRUIT RETROGAME UTILITY: remaps buttons on Raspberry Pi GPIO header to
+virtual USB keyboard presses.  Great for classic game emulators!  Retrogame
+is interrupt-driven and efficient (typically < 0.3% CPU use, even w/heavy
+button-mashing) and debounces inputs for glitch-free gaming.
 
 Connect one side of button(s) to GND pin (there are several on the GPIO
 header, but see later notes) and the other side to GPIO pin of interest.
 Internal pullups are used; no resistors required.  Avoid pins 8 and 10;
-these are configured as a serial port by default on most systems (this
-can be disabled but takes some doing).  Pin configuration is currently
-set in global table; no config file yet.  See later comments.
+these are configured as a serial port by default on most systems (this can
+be disabled via raspi-config).
 
-Must be run as root, i.e. 'sudo ./retrogame &' or configure init scripts
-to launch automatically at system startup.
+Pin configuration is currently set in global table; no config file yet.
 
-Requires uinput kernel module.  This is typically present on popular
-Raspberry Pi Linux distributions but not enabled on some older varieties.
-To enable, either type:
+Must be run as root, i.e. 'sudo ./retrogame &' or edit /etc/rc.local to
+launch automatically at system startup.
 
-    sudo modprobe uinput
-
-Or, to make this persistent between reboots, add a line to /etc/modules:
+Early Raspberry Pi Linux distributions might not have the uinput kernel
+module installed by default.  To enable this, add a line to /etc/modules:
 
     uinput
-
-Prior versions of this code, when being compiled for use with the Cupcade
-or PiGRRL projects, required CUPCADE to be #defined.  This is no longer
-the case; instead a test is performed to see if a PiTFT is connected, and
-one of two I/O tables is automatically selected.
 
 Written by Phil Burgess for Adafruit Industries, distributed under BSD
 License.  Adafruit invests time and resources providing this open source
@@ -77,15 +68,14 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "keyTable.h"
 
 
-// START HERE ------------------------------------------------------------
+// START HERE --------------------------------------------------------------
 // This table remaps GPIO inputs to keyboard values.  In this initial
-// implementation there's a 1:1 relationship (can't attach multiple keys
-// to a button) and the list is fixed in code; there is no configuration
-// file.  Buttons physically connect between GPIO pins and ground.  There
-// are only a few GND pins on the GPIO header, so a breakout board is
-// often needed.  If you require just a couple extra ground connections
-// and have unused GPIO pins, set the corresponding key value to GND to
-// create a spare ground point.
+// implementation there's a 1:1 relationship (can't attach multiple keys to
+// a button) and the list is fixed in code; there is no configuration file.
+// Buttons physically connect between GPIO pins and ground.  There are only
+// a few GND pins on the GPIO header, so a breakout board is often needed.
+// If you require just a couple extra ground connections and have unused
+// GPIO pins, set the corresponding key value to GND to create a spare.
 
 #define GND -1
 struct {
@@ -169,7 +159,7 @@ const int           vulcanKey  = KEY_ESC, // Keycode to send
                     repTime2   = 100;     // Time between key repetitions
 
 
-// A few globals ---------------------------------------------------------
+// Global variables and such -----------------------------------------------
 
 extern char
   *__progname,                       // Program name (for error reporting)
@@ -179,7 +169,8 @@ char
    running      = 1,                 // Signal handler will set to 0 (exit)
   *cfgPath,                          // Directory containing config file
   *cfgName      = NULL,              // Name (no path) of config
-  *cfgPathname;                      // Full path/name to config file
+  *cfgPathname,                      // Full path/name to config file
+   board;                            // 0=Pi1Rev1, 1=Pi1Rev2, 2=Pi2/Pi3
 volatile unsigned int
   *gpio;                             // GPIO register table
 const int
@@ -203,7 +194,58 @@ int
 #define GPPUDCLK0             (0x98 / 4)
 
 
-// Some utility functions ------------------------------------------------
+// Some utility functions --------------------------------------------------
+
+// Detect Pi board type.  Not detailed, just enough for GPIO compatibilty:
+// 0 = Pi 1 Model B revision 1
+// 1 = Pi 1 Model B revision 2, Model A, Model B+, Model A+
+// 2 = Pi 2 Model B or Pi 3
+static int boardType(void) {
+	FILE *fp;
+	char  buf[1024], *ptr;
+	int   n, board = 1; // Assume Pi1 Rev2 by default
+
+	// Relies on info in /proc/cmdline.  If this becomes unreliable
+	// in the future, alt code below uses /proc/cpuinfo if any better.
+#if 1
+	if((fp = fopen("/proc/cmdline", "r"))) {
+		while(fgets(buf, sizeof(buf), fp)) {
+			if((ptr = strstr(buf, "mem_size=")) &&
+			   (sscanf(&ptr[9], "%x", &n) == 1) &&
+			   (n == 0x3F000000)) {
+				board = 2; // Appears to be a Pi 2
+				break;
+			} else if((ptr = strstr(buf, "boardrev=")) &&
+			          (sscanf(&ptr[9], "%x", &n) == 1) &&
+			          ((n == 0x02) || (n == 0x03))) {
+				board = 0; // Appears to be an early Pi
+				break;
+			}
+		}
+		fclose(fp);
+	}
+#else
+	char s[8];
+	if((fp = fopen("/proc/cpuinfo", "r"))) {
+		while(fgets(buf, sizeof(buf), fp)) {
+			if((ptr = strstr(buf, "Hardware")) &&
+			   (sscanf(&ptr[8], " : %7s", s) == 1) &&
+			   (!strcmp(s, "BCM2709"))) {
+				board = 2; // Appears to be a Pi 2
+				break;
+			} else if((ptr = strstr(buf, "Revision")) &&
+			          (sscanf(&ptr[8], " : %x", &n) == 1) &&
+			          ((n == 0x02) || (n == 0x03))) {
+				board = 0; // Appears to be an early Pi
+				break;
+			}
+		}
+		fclose(fp);
+	}
+#endif
+
+	return board;
+}
 
 // Set one GPIO pin attribute through the Sysfs interface.
 static int pinSetup(int pin, char *attr, char *value) {
@@ -216,7 +258,7 @@ static int pinSetup(int pin, char *attr, char *value) {
 	return (w != len); // 0 = success
 }
 
-// Set GPIO pull up/down/none
+// Configure GPIO internal pull up/down/none
 static void pull(int bitmask, int state) {
 	volatile unsigned char shortWait;
 	gpio[GPPUD]     = state;         // 2=up, 1=down, 0=none
@@ -227,14 +269,15 @@ static void pull(int bitmask, int state) {
 	gpio[GPPUDCLK0] = 0;
 }
 
-// Restore GPIO to startup state; un-export any Sysfs pins used, don't
-// leave any filesystem cruft.  Also restores any GND pins to inputs and
-// disables previously-set pull-ups.  Write errors are ignored as pins
-// may be in a partially-initialized state.
+// Restore GPIO and uinput to startup state; un-export any Sysfs pins used,
+// don't leave any filesystem cruft; restore any GND pins to inputs and
+// disable previously-set pull-ups.  Write errors are ignored as pins may be
+// in a partially-initialized state.
 static void unloadPinConfig() {
 	char buf[50];
 	int  fd, i, j, bitmask;
 
+	// Close GPIO file descriptors
 	for(i=0; i<32; i++) {
 		if(p[i].fd >= 0) {
 			close(p[i].fd);
@@ -244,6 +287,7 @@ static void unloadPinConfig() {
 		p[i].events = p[i].revents = 0;
 	}
 
+	// Close uinput file descriptors
 	keyfd = -1;
 	if(keyfd2 >= 0) {
 		close(keyfd2);
@@ -255,6 +299,7 @@ static void unloadPinConfig() {
 		keyfd1 = -1;
 	}
 
+	// Un-export pins
 	sprintf(buf, "%s/unexport", sysfs_root);
 	if((fd = open(buf, O_WRONLY)) >= 0) {
 		for(i=0; io[i].pin >= 0; i++) {
@@ -268,7 +313,7 @@ static void unloadPinConfig() {
 		close(fd);
 	}
 
-	// Disable any previously-set pullups...
+	// Disable pullups
 	for(bitmask=i=0; (j=io[i].pin) >= 0; i++) // Bitmap of pullup pins
 		if(io[i].key != GND) bitmask |= (1 << j);
 	pull(bitmask, 0); // Disable pullups
@@ -282,8 +327,8 @@ static void err(char *msg) {
 	exit(1);
 }
 
-// Filter function for scandir(), identifies possible device candidates
-// for simulated keypress events (separate from actual USB keyboard(s)).
+// Filter function for scandir(), identifies possible device candidates for
+// simulated keypress events (distinct from actual USB keyboard(s)).
 static int filter1(const struct dirent *d) {
 	if(!strncmp(d->d_name, "input", 5)) { // Name usu. 'input' + #
 		// Read contents of 'name' file inside this subdirectory,
@@ -300,7 +345,6 @@ static int filter1(const struct dirent *d) {
 		}
 		if(!strncmp(line, __progname, strlen(__progname))) return 1;
 	}
-
         return 0;
 }
 
@@ -310,7 +354,7 @@ static int filter2(const struct dirent *d) {
 }
 
 #if 0
-// Search for name in dictionary, return corresponding value (-1 = not found)
+// Search for name in dictionary, return assigned value (-1 = not found)
 static int dictSearch(char *str, dict *d) {
 	int i;
 	for(i=0; d[i].name && strcasecmp(str, d[i].name); i++);
@@ -361,10 +405,11 @@ static void loadPinConfig() {
 			p[j].revents = 0;
 		}
 	}
-	close(fd); // Done exporting
+	close(fd); // Done w/Sysfs exporting
 
 	// Set up uinput
 
+	// Attempt to create uidev virtual keyboard
 	if((keyfd1 = open("/dev/uinput", O_WRONLY | O_NONBLOCK)) >= 0) {
 		(void)ioctl(keyfd1, UI_SET_EVBIT, EV_KEY);
 		for(i=0; io[i].pin >= 0; i++) {
@@ -386,22 +431,19 @@ static void loadPinConfig() {
 	}
 
 	// SDL2 (used by some newer emulators) wants /dev/input/eventX
-	// instead -- BUT -- this is the odd thing, and I don't fully
-	// understand the why -- eventX only exists if a physical USB
-	// keyboard has been connected, OR IF /dev/uinput in the code
-	// above has been opened and set up.  Skip the prior steps and
-	// it won't happen (this wasn't necessary in earlier versions,
-	// could just go right to this step for SDL2, so not sure what's
-	// up).  Since we might be running on an earlier system, we'll
-	// start with uinput by default, then override the value of fd
-	// only *if* eventX exists, should cover both cases.
+	// instead -- BUT -- this only exists if there's a physical USB
+	// keyboard attached or if the above code has run and created a
+	// virtual keyboard.  On older systems this method doesn't apply,
+	// events can be sent to the keyfd1 virtual keyboard above...so,
+	// this code looks for an eventX device and (if present) will use
+	// that as the destination for events, else fallback on keyfd1.
 
 	// The 'X' in eventX is a unique identifier (typically a numeric
 	// digit or two) for each input device, dynamically assigned as
 	// USB input devices are plugged in or disconnected (or when the
-	// above code in retrogame runs).  As it's dynamically assigned,
-	// we can't rely on a fixed number -- it will vary if there's a
-	// keyboard connected when the program starts.
+	// above code runs, creating a virtual keyboard).  As it's
+	// dynamically assigned, we can't rely on a fixed number -- it
+	// will vary if there's a keyboard connected at startup.
 
 	struct dirent **namelist;
 	int             n;
@@ -418,7 +460,7 @@ static void loadPinConfig() {
 		  namelist[0]->d_name);
 		for(i=0; i<n; i++) free(namelist[i]);
 		free(namelist);
-		// Within the given device path should be subpath with
+		// Within the given device path should be a subpath with
 		// the name 'eventX' (X varies), again theoretically
 		// should be only one, first in list is used.
 		if((n = scandir(path, &namelist, filter2, NULL)) > 0) {
@@ -449,62 +491,11 @@ static void loadPinConfig() {
 
 	keyfd2 = open(evName, O_WRONLY | O_NONBLOCK);
 	keyfd  = (keyfd2 >= 0) ? keyfd2 : keyfd1;
+	// keyfd1 and 2 are global and are held open (as a destination for
+	// key events) until unloadPinConfig() is called.
 }
 
-// Detect Pi board type.  Doesn't return super-granular details,
-// just the most basic distinction needed for GPIO compatibility:
-// 0: Pi 1 Model B revision 1
-// 1: Pi 1 Model B revision 2, Model A, Model B+, Model A+
-// 2: Pi 2 Model B
-
-static int boardType(void) {
-	FILE *fp;
-	char  buf[1024], *ptr;
-	int   n, board = 1; // Assume Pi1 Rev2 by default
-
-	// Relies on info in /proc/cmdline.  If this becomes unreliable
-	// in the future, alt code below uses /proc/cpuinfo if any better.
-#if 1
-	if((fp = fopen("/proc/cmdline", "r"))) {
-		while(fgets(buf, sizeof(buf), fp)) {
-			if((ptr = strstr(buf, "mem_size=")) &&
-			   (sscanf(&ptr[9], "%x", &n) == 1) &&
-			   (n == 0x3F000000)) {
-				board = 2; // Appears to be a Pi 2
-				break;
-			} else if((ptr = strstr(buf, "boardrev=")) &&
-			          (sscanf(&ptr[9], "%x", &n) == 1) &&
-			          ((n == 0x02) || (n == 0x03))) {
-				board = 0; // Appears to be an early Pi
-				break;
-			}
-		}
-		fclose(fp);
-	}
-#else
-	char s[8];
-	if((fp = fopen("/proc/cpuinfo", "r"))) {
-		while(fgets(buf, sizeof(buf), fp)) {
-			if((ptr = strstr(buf, "Hardware")) &&
-			   (sscanf(&ptr[8], " : %7s", s) == 1) &&
-			   (!strcmp(s, "BCM2709"))) {
-				board = 2; // Appears to be a Pi 2
-				break;
-			} else if((ptr = strstr(buf, "Revision")) &&
-			          (sscanf(&ptr[8], " : %x", &n) == 1) &&
-			          ((n == 0x02) || (n == 0x03))) {
-				board = 0; // Appears to be an early Pi
-				break;
-			}
-		}
-		fclose(fp);
-	}
-#endif
-
-	return board;
-}
-
-// Handle signal events (32), config file change events (33) or
+// Handle signal events (i=32), config file change events (33) or
 // config directory contents change events (34).
 // CONFIGURATION FILES AREN'T YET IMPLEMENTED, but this is a vital
 // part of that, monitoring for config changes so new settings can
@@ -601,29 +592,20 @@ static void pollHandler(int i) {
 }
 
 
-// Main stuff ------------------------------------------------------------
+// Init and main loop ------------------------------------------------------
 
 int main(int argc, char *argv[]) {
 
-	// A few arrays here are declared with 32 elements, even though
-	// values aren't needed for io[] members where the 'key' value is
-	// GND.  This simplifies the code a bit -- no need for mallocs and
-	// tests to create these arrays -- but may waste a handful of
-	// bytes for any declared GNDs.
-	char                   c,            // Pin input value ('0'/'1')
-	                       board;        // 0=Pi1Rev1, 1=Pi1Rev2, 2=Pi2
-	int                    fd,           // For mmap, sysfs, uinput
-	                       i, j,         // Asst. counter
-	                       timeout = -1, // poll() timeout
-	                       lastKey = -1; // Last key down (for repeat)
-	unsigned long          bitMask;      // For Vulcan pinch detect
-	struct input_event     keyEv, synEv; // uinput events
-	sigset_t               sigset;       // Signal mask
+	char               c;            // Pin input value ('0'/'1')
+	int                fd,           // For mmap, sysfs
+	                   i, j,         // Asst. counter
+	                   timeout = -1, // poll() timeout
+	                   lastKey = -1; // Last key down (for repeat)
+	unsigned long      bitMask;      // For Vulcan pinch detect
+	struct input_event keyEv, synEv; // uinput events
+	sigset_t           sigset;       // Signal mask
 
-	memset(p, 0, sizeof(p));
-	memset(intstate, 0, sizeof(intstate));
-	memset(extstate, 0, sizeof(extstate));
-	for(i=0; i<35; i++) p[i].fd = -1;
+	// Locate configuration file (if any) and path ---------------------
 
 	if(argc > 1) { // First argument (if given) is config file name
 		char *ptr = strrchr(argv[1], '/'); // Full pathname given?
@@ -658,10 +640,22 @@ int main(int argc, char *argv[]) {
 	}
 	if(!cfgName) cfgName = &cfgPathname[strlen(cfgPath) + 1];
 
-	// Catch all signal types so GPIO cleanup on exit is possible
+	// Catch signals, config file changes ------------------------------
+
+	// Clear all descriptors and GPIO state, init input event structures
+	memset(p, 0, sizeof(p));
+	for(i=0; i<35; i++) p[i].fd = -1;
+	memset(intstate, 0, sizeof(intstate));
+	memset(extstate, 0, sizeof(extstate));
+	memset(&keyEv  , 0, sizeof(keyEv));
+	memset(&synEv  , 0, sizeof(synEv));
+	keyEv.type  = EV_KEY;
+	synEv.type  = EV_SYN;
+	synEv.code  = SYN_REPORT;
+
 	sigfillset(&sigset);
 	sigprocmask(SIG_BLOCK, &sigset, NULL);
-	// pollfd #32 is for catching signals...
+	// pollfd #32 catches signals, so GPIO cleanup on exit is possible
 	p[32].fd     = signalfd(-1, &sigset, 0);
 	p[32].events = POLLIN;
 
@@ -671,44 +665,28 @@ int main(int argc, char *argv[]) {
 	// This change detection will let you edit the config and have
 	// immediate feedback without needing to kill the process or
 	// reboot the system.
-
 	for(i=33; i<=34; i++) {
 		p[i].fd     = inotify_init();
 		p[i].events = POLLIN;
 	}
-
 	fileWatch = inotify_add_watch(p[33].fd, cfgPathname,
 	  IN_MODIFY | IN_IGNORED);
 	inotify_add_watch(p[34].fd, cfgPath,
 	  IN_CREATE | IN_MOVED_FROM | IN_MOVED_TO);
 
 	// p[0-31] are related to GPIO states, and will be reconfigured
-	// each time the (to-do) config file is loaded.
+	// each time the config file is loaded.
 
-	// Select io[] table for Cupcade (TFT) or 'normal' project.
-	io = (access("/etc/modprobe.d/adafruit.conf", F_OK) ||
-	      access("/dev/fb1", F_OK)) ? ioStandard : ioTFT;
+	// GPIO startup ----------------------------------------------------
 
-	// If this is a "Revision 1" Pi board (no mounting holes),
-	// remap certain pin numbers in the io[] array for compatibility.
-	// This way the code doesn't need modification for old boards.
 	board = boardType();
-	if(board == 0) {
-		for(i=0; io[i].pin >= 0; i++) {
-			if(     io[i].pin ==  2) io[i].pin = 0;
-			else if(io[i].pin ==  3) io[i].pin = 1;
-			else if(io[i].pin == 27) io[i].pin = 21;
-		}
-	}
 
-	// ----------------------------------------------------------------
 	// Although Sysfs provides solid GPIO interrupt handling, there's
 	// no interface to the internal pull-up resistors (this is by
 	// design, being a hardware-dependent feature).  It's necessary to
 	// grapple with the GPIO configuration registers directly to enable
 	// the pull-ups.  Based on GPIO example code by Dom and Gert van
 	// Loo on elinux.org
-
 	if((fd = open("/dev/mem", O_RDWR | O_SYNC)) < 0)
 		err("Can't open /dev/mem");
 	gpio = mmap(            // Memory-mapped I/O
@@ -723,33 +701,42 @@ int main(int argc, char *argv[]) {
 	close(fd);              // Not needed after mmap()
 	if(gpio == MAP_FAILED) err("Can't mmap()");
 
-	// Initialize input event structures
-	memset(&keyEv, 0, sizeof(keyEv));
-	keyEv.type  = EV_KEY;
-	memset(&synEv, 0, sizeof(synEv));
-	synEv.type  = EV_SYN;
-	synEv.code  = SYN_REPORT;
-	synEv.value = 0;
+	// THIS CODE WILL BE GOING AWAY OR MOVING WHEN CONFIG FILES DONE:
+
+	// Select io[] table for Cupcade (TFT) or 'normal' project.
+	io = (access("/etc/modprobe.d/adafruit.conf", F_OK) ||
+	      access("/dev/fb1", F_OK)) ? ioStandard : ioTFT;
+
+	// If this is a "Revision 1" Pi board (no mounting holes),
+	// remap certain pin numbers in the io[] array for compatibility.
+	// This way the code doesn't need modification for old boards.
+	// Will be moved to loadPinConfig() with some changes.
+	if(board == 0) {
+		for(i=0; io[i].pin >= 0; i++) {
+			if(     io[i].pin ==  2) io[i].pin = 0;
+			else if(io[i].pin ==  3) io[i].pin = 1;
+			else if(io[i].pin == 27) io[i].pin = 21;
+		}
+	}
 
 	loadPinConfig();
 
+	// Main loop -------------------------------------------------------
 
-	// ----------------------------------------------------------------
 	// Monitor GPIO file descriptors for button events.  The poll()
 	// function watches for GPIO IRQs in this case; it is NOT
 	// continually polling the pins!  Processor load is near zero.
 
-	while(running) { // Signal handler can set this to 0 to exit
+	while(running) { // Signal handler will set this to 0 to exit
 		// Wait for IRQ on pin (or timeout for button debounce)
 		if(poll(p, 35, timeout) > 0) { // If IRQ...
-			for(i=0; i<32; i++) { // Each GPIO bit...
+			for(i=0; i<32; i++) {  // For each GPIO bit...
 				if(p[i].revents) { // Event received?
 					timeout = debounceTime;
-					// Read current pin state,
-					// store in internal state
-					// flag, but don't issue to
-					// uinput yet -- must wait
-					// for debounce!
+					// Read current pin state, store in
+					// internal state flag, flag, but
+					// don't issue to uinput yet -- must
+					// wait for debounce!
 					lseek(p[i].fd, 0, SEEK_SET);
 					read(p[i].fd, &c, 1);
 					if(c == '0')      intstate[i] = 1;
@@ -765,13 +752,13 @@ int main(int argc, char *argv[]) {
 			}
 			c = 0; // Don't issue SYN event
 			// Else timeout occurred
-		} else if(timeout == debounceTime) { // Button debounce timeout
+		} else if(timeout == debounceTime) { // Debounce timeout
 			bitMask = 0L; // Mask of buttons currently pressed
 			for(c=i=0; (j=io[i].pin) >= 0; i++) {
 				if(io[i].key != GND) {
 					// Compare internal state against
 					// previously-issued value.  Send
-					// keystrokes only for changed states.
+					// keys only for changed states.
 					if(intstate[j] != extstate[j]) {
 						extstate[j] = intstate[j];
 						keyEv.code  = io[i].key;
@@ -790,7 +777,8 @@ int main(int argc, char *argv[]) {
 							// return to normal
 							// IRQ monitoring
 							// (no timeout).
-							lastKey = timeout = -1;
+							lastKey = timeout =
+							  -1;
 						}
 					}
 					if(intstate[j]) bitMask |= (1 << j);
@@ -802,7 +790,7 @@ int main(int argc, char *argv[]) {
 			// a button state change, esc keypress will be sent.
 			if((bitMask & vulcanMask) == vulcanMask)
 				timeout = vulcanTime;
-		} else if(timeout == vulcanTime) { // Vulcan timeout occurred
+		} else if(timeout == vulcanTime) { // Vulcan key timeout
 			// Send keycode (MAME exits or displays exit menu)
 			keyEv.code = vulcanKey;
 			for(i=1; i>= 0; i--) { // Press, release
@@ -825,8 +813,7 @@ int main(int argc, char *argv[]) {
 		if(c) write(keyfd, &synEv, sizeof(synEv));
 	}
 
-	// ----------------------------------------------------------------
-	// Clean up
+	// Clean up --------------------------------------------------------
 
 	unloadPinConfig(); // Close uinput, un-export pins
 
