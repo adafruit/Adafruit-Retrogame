@@ -1,8 +1,8 @@
 /*
 ADAFRUIT RETROGAME UTILITY: remaps buttons on Raspberry Pi GPIO header
 to virtual USB keyboard presses.  Great for classic game emulators!
-Retrogame is interrupt-driven and efficient (usually under 0.3% CPU use)
-and debounces inputs for glitch-free gaming.
+Retrogame is interrupt-driven and efficient (typically < 0.3% CPU use,
+even w/heavy button-mashing) and debounces inputs for glitch-free gaming.
 
 Connect one side of button(s) to GND pin (there are several on the GPIO
 header, but see later notes) and the other side to GPIO pin of interest.
@@ -35,7 +35,7 @@ code, please support Adafruit and open-source hardware by purchasing
 products from Adafruit!
 
 
-Copyright (c) 2013 Adafruit Industries.
+Copyright (c) 2013, 2016 Adafruit Industries.
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -71,6 +71,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/signalfd.h>
+#include <sys/inotify.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
 
@@ -174,12 +175,18 @@ extern char
   *program_invocation_name;          // Full name as invoked (path, etc.)
 char
    sysfs_root[] = "/sys/class/gpio", // Location of Sysfs GPIO files
-   running      = 1;                 // Signal handler will set to 0 (exit)
+   running      = 1,                 // Signal handler will set to 0 (exit)
+  *cfgPath,                          // Directory containing config file
+  *cfgName      = NULL,              // Name (no path) of config
+  *cfgPathname;                      // Full path/name to config file
 volatile unsigned int
   *gpio;                             // GPIO register table
 const int
    debounceTime = 20;                // 20 ms for button debouncing
-
+struct pollfd
+   p[35];                            // File descriptors for poll()
+int
+   fileWatch;
 
 // Some utility functions ------------------------------------------------
 
@@ -302,6 +309,91 @@ static int filter2(const struct dirent *d) {
 	return !strncmp(d->d_name, "event", 5);
 }
 
+// Handle signal events (0), config file change events (1) or
+// config directory contents change events (2).
+// CONFIGURATION FILES AREN'T YET IMPLEMENTED, but this is a vital
+// part of that, monitoring for config changes so new settings can
+// be loaded synamically without a kill/restart/whatev.
+static void pollHandler(int i) {
+	if(i == 0) { // Signal event
+		struct signalfd_siginfo info;
+		read(p[0].fd, &info, sizeof(info));
+		if(info.ssi_signo == SIGHUP) { // kill -1 = force reload
+			// Reload config
+			printf("SIGHUP\n");
+		} else { // Other signal = abort program
+			running = 0;
+		}
+	} else { // Change in config file or directory contents
+		char evBuf[1000];
+		int  evCount = 0, bufPos = 0,
+		     bytesRead = read(p[i].fd, evBuf, sizeof(evBuf));
+		while(bufPos < bytesRead) {
+			struct inotify_event *ev =
+			  (struct inotify_event *)&evBuf[bufPos];
+
+			printf("EVENT %d:\n", evCount++);
+			printf("\tinotify event mask: %08x\n", ev->mask);
+			printf("\tlen: %d\n", ev->len);
+			if(ev->len > 0)
+				printf("\tname: '%s'\n", ev->name);
+
+			if(ev->mask & IN_MODIFY) {
+				puts("\tConfig file changed");
+			} else if(ev->mask & IN_IGNORED) {
+				// Config file deleted -- stop watching it
+				puts("\tConfig file removed");
+				inotify_rm_watch(p[1].fd, fileWatch);
+				// Closing the descriptor turns out to be
+				// important, as removing the watch itself
+				// creates another IN_IGNORED event.
+				// Avoids turtles all the way down.
+				close(p[1].fd);
+				p[1].fd     = -1;
+				p[1].events =  0;
+			} else if(ev->mask & IN_MOVED_FROM) {
+				// File moved/renamed from directory...
+				// check if it's the one we're monitoring.
+				puts("\tFile moved or renamed");
+				if(!strcmp(ev->name, cfgName)) {
+					// It's our file -- stop watching it
+					puts("\tEffectively removed");
+					inotify_rm_watch(p[1].fd, fileWatch);
+					close(p[1].fd);
+					p[1].fd     = -1;
+					p[1].events =  0;
+				} else {
+					// Some other file -- disregard
+					puts("\tNot the file we're watching");
+				}
+			} else if(ev->mask & (IN_CREATE | IN_MOVED_TO)) {
+				// File moved/renamed to directory...
+				// check if it's the one we're monitoring for.
+				puts("\tNew file in directory...");
+				if(!strcmp(ev->name, cfgName)) {
+					// It's our file -- start watching it!
+					puts("\tFile created/moved-to!");
+					if(p[1].fd >= 0) { // Existing file?
+						inotify_rm_watch(
+						  p[1].fd, fileWatch);
+						close(p[1].fd);
+					}
+					p[1].fd   = inotify_init();
+					fileWatch = inotify_add_watch(
+					  p[1].fd, cfgPathname,
+					  IN_MODIFY | IN_IGNORED);
+					p[1].events = POLLIN;
+				} else {
+					// Some other file -- disregard
+					puts("\tNot the config file.");
+				}
+			}
+
+			bufPos += sizeof(struct inotify_event) + ev->len;
+		}
+	}
+}
+
 // Main stuff ------------------------------------------------------------
 
 #define PI1_BCM2708_PERI_BASE 0x20000000
@@ -332,15 +424,47 @@ int main(int argc, char *argv[]) {
 	unsigned long          bitMask, bit; // For Vulcan pinch detect
 	volatile unsigned char shortWait;    // Delay counter
 	struct input_event     keyEv, synEv; // uinput events
-	struct pollfd          p[35];        // File descriptors for poll()
 	sigset_t               sigset;       // Signal mask
+
+	if(argc > 1) { // First argument (if given) is config file name
+		char *ptr = strrchr(argv[1], '/'); // Full pathname given?
+		if(ptr) { // Pathname given; separate into path & name
+			if(!(cfgPathname = strdup(argv[1])))
+				err("malloc() fail");
+			int len = ptr - argv[1]; // Length of path component
+			if(!len) { // Root path?
+				cfgPath = "/";
+				cfgName = &cfgPathname[1];
+			} else {
+				if(!(cfgPath = (char *)malloc(len + 1)))
+					err("malloc() fail");
+				memcpy(cfgPath, argv[1], len);
+				cfgPath[len] = 0;
+			}
+		} else { // No path given; use /boot directory.
+			cfgPath = "/boot";
+			if(!(cfgPathname = (char *)malloc(
+			  strlen(cfgPath) + strlen(argv[1]) + 2)))
+				err("malloc() fail");
+			sprintf(cfgPathname, "%s/%s", cfgPath, argv[1]);
+		}
+	} else {
+		// No argument passed -- config file is located in /boot,
+		// name is "[program name].cfg" (e.g. /boot/retrogame.cfg)
+		cfgPath = "/boot";
+		if(!(cfgPathname = (char *)malloc(
+		  strlen(cfgPath) + strlen(__progname) + 6)))
+			err("malloc() fail");
+		sprintf(cfgPathname, "%s/%s.cfg", cfgPath, __progname);
+	}
+	if(!cfgName) cfgName = &cfgPathname[strlen(cfgPath) + 1];
 
 	// Catch all signal types so GPIO cleanup on exit is possible
 	sigfillset(&sigset);
 	sigprocmask(SIG_BLOCK, &sigset, NULL);
 	// pollfd #0 is for catching signals...
 	p[0].fd      = signalfd(-1, &sigset, 0);
-	p[0].events  = POLLIN | POLLERR | POLLHUP;
+	p[0].events  = POLLIN;
 	p[0].revents = 0;
 
 	// pollfd #1 and #2 will be used for detecting changes in the
@@ -349,10 +473,17 @@ int main(int argc, char *argv[]) {
 	// This change detection will let you edit the config and have
 	// immediate feedback without needing to kill the process or
 	// reboot the system.
-	p[1].fd     = -1;
-	p[1].events =  0;
-	p[2].fd     = -1;
-	p[2].events =  0;
+
+	for(i=1; i<=2; i++) {
+		p[i].fd      = inotify_init();
+		p[i].events  = POLLIN;
+		p[i].revents = 0;
+	}
+
+	fileWatch = inotify_add_watch(p[1].fd, cfgPathname,
+	  IN_MODIFY | IN_IGNORED);
+	inotify_add_watch(p[2].fd, cfgPath,
+	  IN_CREATE | IN_MOVED_FROM | IN_MOVED_TO);
 
 	// p[0-2] NEVER CHANGE for the remainder of the application's
 	// lifetime.  p[3...n] are then related to GPIO states, and will
@@ -566,53 +697,24 @@ int main(int argc, char *argv[]) {
 	while(running) { // Signal handler can set this to 0 to exit
 		// Wait for IRQ on pin (or timeout for button debounce)
 		if(poll(p, j, timeout) > 0) { // If IRQ...
-			// Scan backwards so buttons have top priority
-			// (first three elements of p[] are for signals,
-			// OK if these are handled less quickly).
-			for(i=j-1; i>=0; i--) { // From last non-GND to 0
+			for(i=0; i<3; i++) {  // Check signals, etc.
 				if(p[i].revents) { // Event received?
-					if(i > 2) { // Is a button
-						timeout = debounceTime;
-						// Read current pin state,
-						// store in internal state
-						// flag, but don't issue to
-						// uinput yet -- must wait
-						// for debounce!
-						lseek(p[i].fd, 0, SEEK_SET);
-						read(p[i].fd, &c, 1);
-						if(c == '0')
-							intstate[i-3] = 1;
-						else if(c == '1')
-							intstate[i-3] = 0;
-					} else { // Is a signal
-						timeout = -1;
-						if(i == 0) {
-							struct
-							  signalfd_siginfo
-							  info;
-							read(p[0].fd, &info,
-							  sizeof(info));
-							if(info.ssi_signo ==
-							  SIGHUP) {
-								// Reload
-								// config
-								printf(
-								  "SIGHUP\n");
-							} else {
-								// Other
-								// signal --
-								// abort
-								// program
-								running = 0;
-							}
-						} else if(i == 1) {
-							// File change,
-							// reload config
-						} else {
-							// Directory change,
-							// maybe reload config
-						}
-					}
+					pollHandler(i);
+					p[i].revents = 0;
+				}
+			}
+			for(; i<j; i++) { // Continue to last non-GND
+				if(p[i].revents) { // Event received?
+					timeout = debounceTime;
+					// Read current pin state,
+					// store in internal state
+					// flag, but don't issue to
+					// uinput yet -- must wait
+					// for debounce!
+					lseek(p[i].fd, 0, SEEK_SET);
+					read(p[i].fd, &c, 1);
+					if(c == '0')      intstate[i-3] = 1;
+					else if(c == '1') intstate[i-3] = 0;
 					p[i].revents = 0;
 				}
 			}
