@@ -74,6 +74,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <sys/inotify.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
+#include "keyTable.h"
 
 
 // START HERE ------------------------------------------------------------
@@ -294,6 +295,15 @@ static int filter1(const struct dirent *d) {
 static int filter2(const struct dirent *d) {
 	return !strncmp(d->d_name, "event", 5);
 }
+
+#if 0
+// Search for name in dictionary, return corresponding value (-1 = not found)
+static int dictSearch(char *str, dict *d) {
+	int i;
+	for(i=0; d[i].name && strcasecmp(str, d[i].name); i++);
+	return d[i].value;
+}
+#endif
 
 // Load pin/key configuration.  Right now this uses the io[] table,
 // eventual plan is to have a configuration file.  Not there yet.
