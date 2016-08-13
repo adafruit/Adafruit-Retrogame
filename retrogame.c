@@ -186,12 +186,27 @@ const int
 struct pollfd
    p[35];                            // File descriptors for poll()
 int
-   fileWatch;
+   fileWatch,                        // inotify file descriptor
+   intstate[32],                     // Button last-read state
+   extstate[32],                     // Button debounced state
+   keyfd1 = -1,                      // /dev/uinput file descriptor
+   keyfd2 = -1,                      // /dev/input/eventX file descriptor
+   keyfd  = -1;                      // = (keyfd2 >= 0) ? keyfd2 : keyfd1;
+
+
+#define PI1_BCM2708_PERI_BASE 0x20000000
+#define PI1_GPIO_BASE         (PI1_BCM2708_PERI_BASE + 0x200000)
+#define PI2_BCM2708_PERI_BASE 0x3F000000
+#define PI2_GPIO_BASE         (PI2_BCM2708_PERI_BASE + 0x200000)
+#define BLOCK_SIZE            (4*1024)
+#define GPPUD                 (0x94 / 4)
+#define GPPUDCLK0             (0x98 / 4)
+
 
 // Some utility functions ------------------------------------------------
 
 // Set one GPIO pin attribute through the Sysfs interface.
-int pinConfig(int pin, char *attr, char *value) {
+static int pinSetup(int pin, char *attr, char *value) {
 	char filename[50];
 	int  fd, w, len = strlen(value);
 	sprintf(filename, "%s/gpio%d/%s", sysfs_root, pin, attr);
@@ -201,32 +216,234 @@ int pinConfig(int pin, char *attr, char *value) {
 	return (w != len); // 0 = success
 }
 
-// Un-export any Sysfs pins used; don't leave filesystem cruft.  Also
-// restores any GND pins to inputs.  Write errors are ignored as pins
+// Restore GPIO to startup state; un-export any Sysfs pins used, don't
+// leave any filesystem cruft.  Also restores any GND pins to inputs and
+// disables previously-set pull-ups.  Write errors are ignored as pins
 // may be in a partially-initialized state.
-void cleanup() {
-	char buf[50];
-	int  fd, i;
+static void unloadPinConfig() {
+	char                   buf[50];
+	int                    fd, i, bitmask;
+	volatile unsigned char shortWait;
+
+	keyfd = -1;
+	if(keyfd2 >= 0) {
+		close(keyfd2);
+		keyfd2 = -1;
+	}
+	if(keyfd1 >= 0) {
+		ioctl(keyfd1, UI_DEV_DESTROY);
+		close(keyfd1);
+		keyfd1 = -1;
+	}
+
 	sprintf(buf, "%s/unexport", sysfs_root);
 	if((fd = open(buf, O_WRONLY)) >= 0) {
 		for(i=0; io[i].pin >= 0; i++) {
 			// Restore GND items to inputs
 			if(io[i].key == GND)
-				pinConfig(io[i].pin, "direction", "in");
+				pinSetup(io[i].pin, "direction", "in");
 			// And un-export all items regardless
 			sprintf(buf, "%d", io[i].pin);
 			write(fd, buf, strlen(buf));
 		}
 		close(fd);
 	}
+
+	// Disable any previously-set pullups...
+	for(bitmask=i=0; io[i].pin >= 0; i++) // Bitmap of pullip pins
+		if(io[i].key != GND) bitmask |= (1 << io[i].pin);
+	gpio[GPPUD]     = 0;                  // Disable pullup
+	for(shortWait=150;--shortWait;);      // Min 150 cycle wait
+	gpio[GPPUDCLK0] = bitmask;            // Set pullup mask
+	for(shortWait=150;--shortWait;);      // Wait again
+	gpio[GPPUD]     = 0;                  // Reset pullup registers
+	gpio[GPPUDCLK0] = 0;
 }
 
 // Quick-n-dirty error reporter; print message, clean up and exit.
-void err(char *msg) {
+static void err(char *msg) {
 	printf("%s: %s.  Try 'sudo %s'.\n", __progname, msg,
 	  program_invocation_name);
-	cleanup();
+	unloadPinConfig();
 	exit(1);
+}
+
+// Filter function for scandir(), identifies possible device candidates
+// for simulated keypress events (separate from actual USB keyboard(s)).
+static int filter1(const struct dirent *d) {
+	if(!strncmp(d->d_name, "input", 5)) { // Name usu. 'input' + #
+		// Read contents of 'name' file inside this subdirectory,
+		// if it matches the retrogame executable, that's probably
+		// the device we want...
+		char  filename[100], line[100];
+		FILE *fp;
+		sprintf(filename, "/sys/devices/virtual/input/%s/name",
+		  d->d_name);
+		memset(line, 0, sizeof(line));
+		if((fp = fopen(filename, "r"))) {
+			fgets(line, sizeof(line), fp);
+			fclose(fp);
+		}
+		if(!strncmp(line, __progname, strlen(__progname))) return 1;
+	}
+
+        return 0;
+}
+
+// A second scandir() filter, checks for filename of 'event' + #
+static int filter2(const struct dirent *d) {
+	return !strncmp(d->d_name, "event", 5);
+}
+
+// Load pin/key configuration.  Right now this uses the io[] table,
+// eventual plan is to have a configuration file.  Not there yet.
+static int loadPinConfig() {
+
+	char                   c, buf[50];
+	int                    i, j, j3, fd, bitmask;
+	volatile unsigned char shortWait;
+
+	// Make combined bitmap of pullup-enabled pins:
+	for(bitmask=i=0; io[i].pin >= 0; i++)
+		if(io[i].key != GND) bitmask |= (1 << io[i].pin);
+	gpio[GPPUD]     = 2;             // Enable pullup
+	for(shortWait=150;--shortWait;); // Min 150 cycle wait
+	gpio[GPPUDCLK0] = bitmask;       // Set pullup mask
+	for(shortWait=150;--shortWait;); // Wait again
+	gpio[GPPUD]     = 0;             // Reset pullup registers
+	gpio[GPPUDCLK0] = 0;
+
+	// All other GPIO config is handled through the sysfs interface.
+
+	sprintf(buf, "%s/export", sysfs_root);
+	if((fd = open(buf, O_WRONLY)) < 0) // Open Sysfs export file
+		err("Can't open GPIO export file");
+	for(i=0,j=3; io[i].pin >= 0; i++) { // For each pin of interest...
+		sprintf(buf, "%d", io[i].pin);
+		write(fd, buf, strlen(buf));             // Export pin
+		pinSetup(io[i].pin, "active_low", "0"); // Don't invert
+		if(io[i].key == GND) {
+			// Set pin to output, value 0 (ground)
+			if(pinSetup(io[i].pin, "direction", "out") ||
+			   pinSetup(io[i].pin, "value"    , "0"))
+				err("Pin config failed (GND)");
+		} else {
+			// Set pin to input, detect rise+fall events
+			if(pinSetup(io[i].pin, "direction", "in") ||
+			   pinSetup(io[i].pin, "edge"     , "both"))
+				err("Pin config failed");
+			// Get initial pin value
+			sprintf(buf, "%s/gpio%d/value",
+			  sysfs_root, io[i].pin);
+			// The p[] file descriptor array isn't necessarily
+			// aligned with the io[] array.  GND keys in the
+			// latter are skipped, but p[] requires contiguous
+			// entries for poll().  So the pins to monitor are
+			// at the head of p[], and there may be unused
+			// elements at the end for each GND.  Same applies
+			// to the intstate[] and extstate[] arrays.
+			if((p[j].fd = open(buf, O_RDONLY)) < 0)
+				err("Can't access pin value");
+			j3 = j - 3; // Signal fds occupy first 3 slots
+			intstate[j3] = 0;
+			if((read(p[j].fd, &c, 1) == 1) && (c == '0'))
+				intstate[j3] = 1;
+			extstate[j3] = intstate[j3];
+			p[j].events  = POLLPRI; // Set up poll() events
+			p[j].revents = 0;
+			j++;
+		}
+	} // 'j' is now count of non-GND items in io[] table + 3 fds
+	close(fd); // Done exporting
+
+	// Set up uinput
+
+	if((keyfd1 = open("/dev/uinput", O_WRONLY | O_NONBLOCK)) >= 0) {
+		(void)ioctl(keyfd1, UI_SET_EVBIT, EV_KEY);
+		for(i=0; io[i].pin >= 0; i++) {
+			if(io[i].key != GND)
+				(void)ioctl(keyfd1, UI_SET_KEYBIT, io[i].key);
+		}
+		(void)ioctl(keyfd1, UI_SET_KEYBIT, vulcanKey);
+		struct uinput_user_dev uidev;
+		memset(&uidev, 0, sizeof(uidev));
+		snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "retrogame");
+		uidev.id.bustype = BUS_USB;
+		uidev.id.vendor  = 0x1;
+		uidev.id.product = 0x1;
+		uidev.id.version = 1;
+		if(write(keyfd1, &uidev, sizeof(uidev)) < 0)
+			err("write failed");
+		if(ioctl(keyfd1, UI_DEV_CREATE) < 0)
+			err("DEV_CREATE failed");
+	}
+
+	// SDL2 (used by some newer emulators) wants /dev/input/eventX
+	// instead -- BUT -- this is the odd thing, and I don't fully
+	// understand the why -- eventX only exists if a physical USB
+	// keyboard has been connected, OR IF /dev/uinput in the code
+	// above has been opened and set up.  Skip the prior steps and
+	// it won't happen (this wasn't necessary in earlier versions,
+	// could just go right to this step for SDL2, so not sure what's
+	// up).  Since we might be running on an earlier system, we'll
+	// start with uinput by default, then override the value of fd
+	// only *if* eventX exists, should cover both cases.
+
+	// The 'X' in eventX is a unique identifier (typically a numeric
+	// digit or two) for each input device, dynamically assigned as
+	// USB input devices are plugged in or disconnected (or when the
+	// above code in retrogame runs).  As it's dynamically assigned,
+	// we can't rely on a fixed number -- it will vary if there's a
+	// keyboard connected when the program starts.
+
+	struct dirent **namelist;
+	int             n;
+	char            evName[100] = "";
+
+	if((n = scandir("/sys/devices/virtual/input",
+	  &namelist, filter1, NULL)) > 0) {
+		// Got a list of device(s).  In theory there should
+		// be only one that makes it through the filter (name
+		// matches retrogame)...if there's multiples, only
+		// the first is used.  (namelist can then be freed)
+		char path[100];
+		sprintf(path, "/sys/devices/virtual/input/%s",
+		  namelist[0]->d_name);
+		for(i=0; i<n; i++) free(namelist[i]);
+		free(namelist);
+		// Within the given device path should be subpath with
+		// the name 'eventX' (X varies), again theoretically
+		// should be only one, first in list is used.
+		if((n = scandir(path, &namelist, filter2, NULL)) > 0) {
+			sprintf(evName, "/dev/input/%s",
+			  namelist[0]->d_name);
+			for(i=0; i<n; i++) free(namelist[i]);
+			free(namelist);
+		}
+	}
+
+	if(!evName[0]) { // Nothing found?  Use fallback method...
+		// Kinda lazy skim for last item in /dev/input/event*
+		// This is NOT guaranteed to be retrogame, but if the
+		// above method fails for some reason, this may be
+		// adequate.  If there's a USB keyboard attached at
+		// boot, it usually instantiates in /dev/input before
+		// retrogame, so even if it's then removed, the index
+		// assigned to retrogame stays put...thus the last
+		// index mmmmight be what we need.
+		char        name[32];
+		struct stat st;
+		for(i=99; i>=0; i--) {
+			sprintf(name, "/dev/input/event%d", i);
+			if(!stat(name, &st)) break; // last valid device
+		}
+		strcpy(evName, (i >= 0) ? name : "/dev/input/event0");
+	}
+
+	keyfd2 = open(evName, O_WRONLY | O_NONBLOCK);
+	keyfd  = (keyfd2 >= 0) ? keyfd2 : keyfd1;
+
+	return j; // Max used index in p[] array
 }
 
 // Detect Pi board type.  Doesn't return super-granular details,
@@ -282,45 +499,22 @@ static int boardType(void) {
 	return board;
 }
 
-// Filter function for scandir(), identifies possible device candidates
-// for simulated keypress events (separate from actual USB keyboard(s)).
-static int filter1(const struct dirent *d) {
-	if(!strncmp(d->d_name, "input", 5)) { // Name usu. 'input' + #
-		// Read contents of 'name' file inside this subdirectory,
-		// if it matches the retrogame executable, that's probably
-		// the device we want...
-		char  filename[100], line[100];
-		FILE *fp;
-		sprintf(filename, "/sys/devices/virtual/input/%s/name",
-		  d->d_name);
-		memset(line, 0, sizeof(line));
-		if((fp = fopen(filename, "r"))) {
-			fgets(line, sizeof(line), fp);
-			fclose(fp);
-		}
-		if(!strncmp(line, __progname, strlen(__progname))) return 1;
-	}
-
-        return 0;
-}
-
-// A second scandir() filter, checks for filename of 'event' + #
-static int filter2(const struct dirent *d) {
-	return !strncmp(d->d_name, "event", 5);
-}
-
 // Handle signal events (0), config file change events (1) or
 // config directory contents change events (2).
 // CONFIGURATION FILES AREN'T YET IMPLEMENTED, but this is a vital
 // part of that, monitoring for config changes so new settings can
 // be loaded synamically without a kill/restart/whatev.
-static void pollHandler(int i) {
+static int pollHandler(int i) {
+	int r = -1;
+
 	if(i == 0) { // Signal event
 		struct signalfd_siginfo info;
 		read(p[0].fd, &info, sizeof(info));
 		if(info.ssi_signo == SIGHUP) { // kill -1 = force reload
-			// Reload config
 			printf("SIGHUP\n");
+			// Reload config
+			unloadPinConfig();
+			r = loadPinConfig();
 		} else { // Other signal = abort program
 			running = 0;
 		}
@@ -339,7 +533,9 @@ static void pollHandler(int i) {
 				printf("\tname: '%s'\n", ev->name);
 
 			if(ev->mask & IN_MODIFY) {
-				puts("\tConfig file changed");
+				puts("\tConfig file changed (reloading)");
+				unloadPinConfig();
+				r = loadPinConfig();
 			} else if(ev->mask & IN_IGNORED) {
 				// Config file deleted -- stop watching it
 				puts("\tConfig file removed");
@@ -351,6 +547,8 @@ static void pollHandler(int i) {
 				close(p[1].fd);
 				p[1].fd     = -1;
 				p[1].events =  0;
+				// Pin config is NOT unloaded...
+				// keep using prior values for now.
 			} else if(ev->mask & IN_MOVED_FROM) {
 				// File moved/renamed from directory...
 				// check if it's the one we're monitoring.
@@ -362,6 +560,8 @@ static void pollHandler(int i) {
 					close(p[1].fd);
 					p[1].fd     = -1;
 					p[1].events =  0;
+					// Pin config is NOT unloaded...
+					// keep using prior values for now.
 				} else {
 					// Some other file -- disregard
 					puts("\tNot the file we're watching");
@@ -383,6 +583,8 @@ static void pollHandler(int i) {
 					  p[1].fd, cfgPathname,
 					  IN_MODIFY | IN_IGNORED);
 					p[1].events = POLLIN;
+					unloadPinConfig();
+					r = loadPinConfig();
 				} else {
 					// Some other file -- disregard
 					puts("\tNot the config file.");
@@ -392,17 +594,12 @@ static void pollHandler(int i) {
 			bufPos += sizeof(struct inotify_event) + ev->len;
 		}
 	}
+
+	return r; // -1 if no change to config file, else max p[] index
 }
 
-// Main stuff ------------------------------------------------------------
 
-#define PI1_BCM2708_PERI_BASE 0x20000000
-#define PI1_GPIO_BASE         (PI1_BCM2708_PERI_BASE + 0x200000)
-#define PI2_BCM2708_PERI_BASE 0x3F000000
-#define PI2_GPIO_BASE         (PI2_BCM2708_PERI_BASE + 0x200000)
-#define BLOCK_SIZE            (4*1024)
-#define GPPUD                 (0x94 / 4)
-#define GPPUDCLK0             (0x98 / 4)
+// Main stuff ------------------------------------------------------------
 
 int main(int argc, char *argv[]) {
 
@@ -411,18 +608,13 @@ int main(int argc, char *argv[]) {
 	// GND.  This simplifies the code a bit -- no need for mallocs and
 	// tests to create these arrays -- but may waste a handful of
 	// bytes for any declared GNDs.
-	char                   buf[50],      // For sundry filenames
-	                       c,            // Pin input value ('0'/'1')
+	char                   c,            // Pin input value ('0'/'1')
 	                       board;        // 0=Pi1Rev1, 1=Pi1Rev2, 2=Pi2
-	int                    fd, fd2,      // For mmap, sysfs, uinput
-	                       i, j, j3,     // Asst. counter
-	                       bitmask,      // Pullup enable bitmask
+	int                    fd,           // For mmap, sysfs, uinput
+	                       i, j,         // Asst. counter
 	                       timeout = -1, // poll() timeout
-	                       intstate[32], // Last-read state
-	                       extstate[32], // Debounced state
 	                       lastKey = -1; // Last key down (for repeat)
 	unsigned long          bitMask, bit; // For Vulcan pinch detect
-	volatile unsigned char shortWait;    // Delay counter
 	struct input_event     keyEv, synEv; // uinput events
 	sigset_t               sigset;       // Signal mask
 
@@ -524,159 +716,8 @@ int main(int argc, char *argv[]) {
 	  (board == 2) ?
 	   PI2_GPIO_BASE :      // -> GPIO registers
 	   PI1_GPIO_BASE);
-
 	close(fd);              // Not needed after mmap()
 	if(gpio == MAP_FAILED) err("Can't mmap()");
-	// Make combined bitmap of pullup-enabled pins:
-	for(bitmask=i=0; io[i].pin >= 0; i++)
-		if(io[i].key != GND) bitmask |= (1 << io[i].pin);
-	gpio[GPPUD]     = 2;                    // Enable pullup
-	for(shortWait=150;--shortWait;);        // Min 150 cycle wait
-	gpio[GPPUDCLK0] = bitmask;              // Set pullup mask
-	for(shortWait=150;--shortWait;);        // Wait again
-	gpio[GPPUD]     = 0;                    // Reset pullup registers
-	gpio[GPPUDCLK0] = 0;
-	(void)munmap((void *)gpio, BLOCK_SIZE); // Done with GPIO mmap()
-
-	// ----------------------------------------------------------------
-	// All other GPIO config is handled through the sysfs interface.
-
-	sprintf(buf, "%s/export", sysfs_root);
-	if((fd = open(buf, O_WRONLY)) < 0) // Open Sysfs export file
-		err("Can't open GPIO export file");
-	for(i=0,j=3; io[i].pin >= 0; i++) { // For each pin of interest...
-		sprintf(buf, "%d", io[i].pin);
-		write(fd, buf, strlen(buf));             // Export pin
-		pinConfig(io[i].pin, "active_low", "0"); // Don't invert
-		if(io[i].key == GND) {
-			// Set pin to output, value 0 (ground)
-			if(pinConfig(io[i].pin, "direction", "out") ||
-			   pinConfig(io[i].pin, "value"    , "0"))
-				err("Pin config failed (GND)");
-		} else {
-			// Set pin to input, detect rise+fall events
-			if(pinConfig(io[i].pin, "direction", "in") ||
-			   pinConfig(io[i].pin, "edge"     , "both"))
-				err("Pin config failed");
-			// Get initial pin value
-			sprintf(buf, "%s/gpio%d/value",
-			  sysfs_root, io[i].pin);
-			// The p[] file descriptor array isn't necessarily
-			// aligned with the io[] array.  GND keys in the
-			// latter are skipped, but p[] requires contiguous
-			// entries for poll().  So the pins to monitor are
-			// at the head of p[], and there may be unused
-			// elements at the end for each GND.  Same applies
-			// to the intstate[] and extstate[] arrays.
-			if((p[j].fd = open(buf, O_RDONLY)) < 0)
-				err("Can't access pin value");
-			j3 = j - 3; // Signal fds occupy first 3 slots
-			intstate[j3] = 0;
-			if((read(p[j].fd, &c, 1) == 1) && (c == '0'))
-				intstate[j3] = 1;
-			extstate[j3] = intstate[j3];
-			p[j].events  = POLLPRI; // Set up poll() events
-			p[j].revents = 0;
-			j++;
-		}
-	} // 'j' is now count of non-GND items in io[] table + 3 fds
-	close(fd); // Done exporting
-
-
-	// ----------------------------------------------------------------
-	// Set up uinput
-
-	// Traditionally we've used /dev/uinput for generating key events,
-	// but see notes below....
-	if((fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK)) < 0)
-		err("Can't open /dev/uinput");
-	if(ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0)
-		err("Can't SET_EVBIT");
-	for(i=0; io[i].pin >= 0; i++) {
-		if(io[i].key != GND) {
-			if(ioctl(fd, UI_SET_KEYBIT, io[i].key) < 0)
-				err("Can't SET_KEYBIT");
-		}
-	}
-	if(ioctl(fd, UI_SET_KEYBIT, vulcanKey) < 0) err("Can't SET_KEYBIT");
-	struct uinput_user_dev uidev;
-	memset(&uidev, 0, sizeof(uidev));
-	snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "retrogame");
-	uidev.id.bustype = BUS_USB;
-	uidev.id.vendor  = 0x1;
-	uidev.id.product = 0x1;
-	uidev.id.version = 1;
-	if(write(fd, &uidev, sizeof(uidev)) < 0)
-		err("write failed");
-	if(ioctl(fd, UI_DEV_CREATE) < 0)
-		err("DEV_CREATE failed");
-
-	// SDL2 (used by some newer emulators) wants /dev/input/eventX
-	// instead -- BUT -- this is the odd thing, and I don't fully
-	// understand the why -- eventX only exists if a physical USB
-	// keyboard has been connected, OR IF /dev/uinput in the code
-	// above has been opened and set up.  Skip the prior steps and
-	// it won't happen (this wasn't necessary in earlier versions,
-	// could just go right to this step for SDL2, so not sure what's
-	// up).  Since we might be running on an earlier system, we'll
-	// start with uinput by default, then override the value of fd
-	// only *if* eventX exists, should cover both cases.
-
-	// The 'X' in eventX is a unique identifier (typically a numeric
-	// digit or two) for each input device, dynamically assigned as
-	// USB input devices are plugged in or disconnected (or when the
-	// above code in retrogame runs).  As it's dynamically assigned,
-	// we can't rely on a fixed number -- it will vary if there's a
-	// keyboard connected when the program starts.
-
-
-	struct dirent **namelist;
-	int             n;
-	char            evName[100] = "";
-
-	if((n = scandir("/sys/devices/virtual/input",
-	  &namelist, filter1, NULL)) > 0) {
-		// Got a list of device(s).  In theory there should
-		// be only one that makes it through the filter (name
-		// matches retrogame)...if there's multiples, only
-		// the first is used.  (namelist can then be freed)
-		char path[100];
-		sprintf(path, "/sys/devices/virtual/input/%s",
-		  namelist[0]->d_name);
-		for(i=0; i<n; i++) free(namelist[i]);
-		free(namelist);
-		// Within the given device path should be subpath with
-		// the name 'eventX' (X varies), again theoretically
-		// should be only one, first in list is used.
-		if((n = scandir(path, &namelist, filter2, NULL)) > 0) {
-			sprintf(evName, "/dev/input/%s",
-			  namelist[0]->d_name);
-			for(i=0; i<n; i++) free(namelist[i]);
-			free(namelist);
-		}
-	}
-
-	if(!evName[0]) { // Nothing found?  Use fallback method...
-		// Kinda lazy skim for last item in /dev/input/event*
-		// This is NOT guaranteed to be retrogame, but if the
-		// above method fails for some reason, this may be
-		// adequate.  If there's a USB keyboard attached at
-		// boot, it usually instantiates in /dev/input before
-		// retrogame, so even if it's then removed, the index
-		// assigned to retrogame stays put...thus the last
-		// index mmmmight be what we need.
-		char        name[32];
-		struct stat st;
-		for(i=99; i>=0; i--) {
-			sprintf(name, "/dev/input/event%d", i);
-			if(!stat(name, &st)) break; // last valid device
-		}
-		strcpy(evName, (i >= 0) ? name : "/dev/input/event0");
-	}
-
-
-	if((fd2 = open(evName, O_WRONLY | O_NONBLOCK)) >= 0)
-		fd = fd2; // Override fd; write to eventX instead
 
 	// Initialize input event structures
 	memset(&keyEv, 0, sizeof(keyEv));
@@ -686,7 +727,7 @@ int main(int argc, char *argv[]) {
 	synEv.code  = SYN_REPORT;
 	synEv.value = 0;
 
-	// 'fd' is now open file descriptor for issuing uinput events
+	j = loadPinConfig();
 
 
 	// ----------------------------------------------------------------
@@ -699,7 +740,8 @@ int main(int argc, char *argv[]) {
 		if(poll(p, j, timeout) > 0) { // If IRQ...
 			for(i=0; i<3; i++) {  // Check signals, etc.
 				if(p[i].revents) { // Event received?
-					pollHandler(i);
+					int x = pollHandler(i);
+					if(x >= 0) j = x;
 					p[i].revents = 0;
 				}
 			}
@@ -735,7 +777,7 @@ int main(int argc, char *argv[]) {
 						extstate[j] = intstate[j];
 						keyEv.code  = io[i].key;
 						keyEv.value = intstate[j];
-						write(fd, &keyEv,
+						write(keyfd, &keyEv,
 						  sizeof(keyEv));
 						c = 1; // Follow w/SYN event
 						if(intstate[j]) { // Press?
@@ -768,9 +810,9 @@ int main(int argc, char *argv[]) {
 			keyEv.code = vulcanKey;
 			for(i=1; i>= 0; i--) { // Press, release
 				keyEv.value = i;
-				write(fd, &keyEv, sizeof(keyEv));
+				write(keyfd, &keyEv, sizeof(keyEv));
 				usleep(10000); // Be slow, else MAME flakes
-				write(fd, &synEv, sizeof(synEv));
+				write(keyfd, &synEv, sizeof(synEv));
 				usleep(10000);
 			}
 			timeout = -1; // Return to normal processing
@@ -781,17 +823,15 @@ int main(int argc, char *argv[]) {
 			c           = 1; // Follow w/SYN event
 			keyEv.code  = io[lastKey].key;
 			keyEv.value = 2; // Key repeat event
-			write(fd, &keyEv, sizeof(keyEv));
+			write(keyfd, &keyEv, sizeof(keyEv));
 		}
-		if(c) write(fd, &synEv, sizeof(synEv));
+		if(c) write(keyfd, &synEv, sizeof(synEv));
 	}
 
 	// ----------------------------------------------------------------
 	// Clean up
 
-	ioctl(fd, UI_DEV_DESTROY); // Destroy and
-	close(fd);                 // close uinput
-	cleanup();                 // Un-export pins
+	unloadPinConfig(); // Close uinput, un-export pins
 
 	puts("Done.");
 
