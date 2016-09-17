@@ -55,6 +55,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <ctype.h>
+#include <stdbool.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -158,6 +160,19 @@ const int           vulcanKey  = KEY_ESC, // Keycode to send
                     repTime1   = 500,     // Key hold time to begin repeat
                     repTime2   = 100;     // Time between key repetitions
 
+
+enum commandNum {
+	CMD_NONE, // Used during config file scanning (no command ID'd yet)
+	CMD_KEY,  // Key-to-GPIO mapping command
+	CMD_GND   // Pin-to-ground assignment
+};
+
+// dict of config file commands that AREN'T keys (KEY_*)
+dict command[] = { // Struct is defined in keyTable.h
+	{ "GND"   , CMD_GND },
+	{ "GROUND", CMD_GND },
+	{  NULL   , -1      } // END-OF-LIST
+};
 
 // Global variables and such -----------------------------------------------
 
@@ -353,21 +368,150 @@ static int filter2(const struct dirent *d) {
 	return !strncmp(d->d_name, "event", 5);
 }
 
-#if 0
 // Search for name in dictionary, return assigned value (-1 = not found)
 static int dictSearch(char *str, dict *d) {
 	int i;
 	for(i=0; d[i].name && strcasecmp(str, d[i].name); i++);
 	return d[i].value;
 }
-#endif
 
-// Load pin/key configuration.  Right now this uses the io[] table,
-// eventual plan is to have a configuration file.  Not there yet.
+// Load pin/key configuration from cfgPathname.
 static void loadPinConfig() {
 
-	char c, buf[50];
-	int  i, j, fd, bitmask;
+	FILE *fp;
+	char  buf[50];
+	int   i, j, fd, bitmask;
+
+	// -----------------------------------------------------------------
+
+	if(NULL == (fp = fopen(cfgPathname, "r"))) {
+		printf("%s: error opening config file '%s'\n",
+		  __progname, cfgPathname);
+		return; // Not fatal; file can still be created
+	}
+
+	// Config file format is super simple, just per-line keyword and
+	// argument(s) with whitespace delimiters...can parse it ourselves
+	// here.  Configuration libraries such as libconfig, libconfuse
+	// have some potent features but enforce a correspondingly more
+	// exacting syntax on the user; do not want if we can avoid it.
+
+	enum     commandNum cmd = CMD_NONE;
+	int      stringLen      = 0,
+	         wordCount      = 0,
+	         keyCode        = KEY_RESERVED,
+	         c, k;
+	bool     readingString  = false,
+	         isComment      = false;
+	uint32_t pinMask        = 0;
+
+	do {
+		c = getc(fp);
+		if(isspace(c) || (c <= 0)) { // If whitespace char...
+			if(readingString && !isComment) {
+				// Switching from string-reading to
+				// whitespace-skipping.  Cap off and process
+				// current string, reset readingString flag.
+				buf[stringLen] = 0;
+				if(wordCount == 1) {
+					// First word on line.  Look it up
+					// in key dict, then command dict
+					pinMask = 0;
+					keyCode = KEY_RESERVED;
+					if((k = dictSearch(
+					  buf, keyTable)) >= 0) {
+						// Start of key command
+						cmd     = CMD_KEY;
+						keyCode = k;
+					} else if((k = dictSearch(buf,
+					  command)) >= 0) {
+						// Not a key, is other
+						// command (e.g. GND)
+						cmd = k;
+					} else {
+						printf("%s: unknown key or "
+						  "command '%s' (not fatal, "
+						  "continuing)\n",
+						  __progname, buf);
+					}
+				} else {
+					// Word #2+ on line;
+					// Certain commands may
+					// accumulate values.
+					char *endptr;
+					int   pinNum;
+					pinNum = strtol(buf, &endptr, 0);
+					if((*endptr) || (pinNum < 0) ||
+					  (pinNum > 31)) {
+						// Non-NUL character
+						// indicates not entire
+						// string was translated,
+						// i.e. bad numeric input.
+						printf("%s: invalid pin "
+						  "'%s' (not fatal, "
+						  "continuing)\n",
+						  __progname, buf);
+					} else {
+						// Add pin # to list
+						pinMask |= (1 << pinNum);
+					}
+				}
+				readingString = false;
+			}
+			if((c == '\n') || (c <= 0)) { // If EOF or EOL
+				// Execute last line if useful command
+				switch(cmd) {
+				   case CMD_KEY:
+// If one bit set, is simple button press,
+// If multiple bits, is Vulcan nerve pinch.
+//printf("KEY CODE %d\n", keyCode);
+//printf("pin mask %04x\n", pinMask);
+// Overwrite old keycode assigned to pin, or clear GND assigned to pin
+					break;
+				   case CMD_GND:
+// One or multiple bits, doesn't matter.
+//printf("GND\n");
+//printf("pin mask %04x\n", pinMask);
+// Overwrite any keycode assigned to pin
+					break;
+				   default:
+					break;
+				}
+				// Reset ALL string-reading flags
+				readingString = false;
+				stringLen     = 0;
+				wordCount     = 0;
+				isComment     = false;
+				cmd           = CMD_NONE;
+			}
+		} else {                        // Non-whitespace char
+			if(isComment) continue;
+			if(!readingString) {
+				// Switching from whitespace-skipping
+				// to string-reading.  Reset string.
+				readingString = true;
+				stringLen     = 0;
+				// Is it beginning of a comment?
+				// If so, ignore chars to next EOL.
+				if(c == '#') {
+					isComment = true;
+					continue;
+				}
+				wordCount++;
+			}
+			// Append characer to current string
+			if(stringLen < (sizeof(buf) - 1)) {
+				buf[stringLen++] = c;
+			}
+		}
+	} while(c > 0);
+
+	fclose(fp);
+
+	// -----------------------------------------------------------------
+
+	// THIS STILL WORKS FROM THE io[] array -- config file handling is
+	// still a work in progress and doesn't do anything yet.
 
 	// Make combined bitmap of pullup-enabled pins:
 	for(bitmask=i=0; (j=io[i].pin) >= 0; i++)
@@ -390,6 +534,7 @@ static void loadPinConfig() {
 				err("Pin config failed (GND)");
 		} else {
 			// Set pin to input, detect rise+fall events
+			char x;
 			if(pinSetup(j, "direction", "in") ||
 			   pinSetup(j, "edge"     , "both"))
 				err("Pin config failed");
@@ -398,7 +543,7 @@ static void loadPinConfig() {
 			if((p[j].fd = open(buf, O_RDONLY)) < 0)
 				err("Can't access pin value");
 			intstate[j] = 0;
-			if((read(p[j].fd, &c, 1) == 1) && (c == '0'))
+			if((read(p[j].fd, &x, 1) == 1) && (x == '0'))
 				intstate[j] = 1;
 			extstate[j] = intstate[j];
 			p[j].events  = POLLPRI; // Set up poll() events
@@ -480,13 +625,12 @@ static void loadPinConfig() {
 		// retrogame, so even if it's then removed, the index
 		// assigned to retrogame stays put...thus the last
 		// index mmmmight be what we need.
-		char        name[32];
 		struct stat st;
 		for(i=99; i>=0; i--) {
-			sprintf(name, "/dev/input/event%d", i);
-			if(!stat(name, &st)) break; // last valid device
+			sprintf(buf, "/dev/input/event%d", i);
+			if(!stat(buf, &st)) break; // last valid device
 		}
-		strcpy(evName, (i >= 0) ? name : "/dev/input/event0");
+		strcpy(evName, (i >= 0) ? buf : "/dev/input/event0");
 	}
 
 	keyfd2 = open(evName, O_WRONLY | O_NONBLOCK);
@@ -821,3 +965,6 @@ int main(int argc, char *argv[]) {
 
 	return 0;
 }
+
+
+
