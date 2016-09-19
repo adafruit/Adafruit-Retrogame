@@ -384,6 +384,7 @@ static void loadPinConfig() {
 
 	// -----------------------------------------------------------------
 
+#if 0
 	if(NULL == (fp = fopen(cfgPathname, "r"))) {
 		printf("%s: error opening config file '%s'\n",
 		  __progname, cfgPathname);
@@ -507,6 +508,7 @@ static void loadPinConfig() {
 	} while(c > 0);
 
 	fclose(fp);
+#endif
 
 	// -----------------------------------------------------------------
 
