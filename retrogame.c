@@ -4,13 +4,16 @@ virtual USB keyboard presses.  Great for classic game emulators!  Retrogame
 is interrupt-driven and efficient (typically < 0.3% CPU use, even w/heavy
 button-mashing) and debounces inputs for glitch-free gaming.
 
+****** IF YOU ARE SEARCHING FOR THE ioStandard[] OR ioTFT[] TABLES: ******
+GPIO pin and key mapping is now set in a configuration file; there's no
+fixed table to edit in this code (as in earlier releases).  An example
+config file is provided in retrogame.cfg.  By default, retrogame looks for
+this file in /boot, but an alternate (full pathname) can be passed as a
+command line argument.
+
 Connect one side of button(s) to GND pin (there are several on the GPIO
 header, but see later notes) and the other side to GPIO pin of interest.
-Internal pullups are used; no resistors required.  Avoid pins 8 and 10;
-these are configured as a serial port by default on most systems (this can
-be disabled via raspi-config).
-
-Pin configuration is currently set in global table; no config file yet.
+Internal pullups are used; no resistors required.
 
 Must be run as root, i.e. 'sudo ./retrogame &' or edit /etc/rc.local to
 launch automatically at system startup.
@@ -24,7 +27,6 @@ Written by Phil Burgess for Adafruit Industries, distributed under BSD
 License.  Adafruit invests time and resources providing this open source
 code, please support Adafruit and open-source hardware by purchasing
 products from Adafruit!
-
 
 Copyright (c) 2013, 2016 Adafruit Industries.
 All rights reserved.
@@ -69,97 +71,40 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <linux/uinput.h>
 #include "keyTable.h"
 
+// Global variables and such -----------------------------------------------
 
-// START HERE --------------------------------------------------------------
-// This table remaps GPIO inputs to keyboard values.  In this initial
-// implementation there's a 1:1 relationship (can't attach multiple keys to
-// a button) and the list is fixed in code; there is no configuration file.
-// Buttons physically connect between GPIO pins and ground.  There are only
-// a few GND pins on the GPIO header, so a breakout board is often needed.
-// If you require just a couple extra ground connections and have unused
-// GPIO pins, set the corresponding key value to GND to create a spare.
-
-#define GND -1
-struct {
-	int pin;
-	int key;
-} *io, // In main() this pointer is set to one of the two tables below.
-   ioTFT[] = {
-	// This pin/key table is used if an Adafruit PiTFT display
-	// is detected using the 'classic' methodology (e.g. Cupcade
-	// or PiGRRL 1 -- NOT PiGRRL 2).
-	// Input   Output (from /usr/include/linux/input.h)
-	{   2,     KEY_LEFT     },   // Joystick (4 pins)
-	{   3,     KEY_RIGHT    },
-	{   4,     KEY_DOWN     },
-	{  17,     KEY_UP       },
-	{  27,     KEY_Z        },   // A/Fire/jump/primary
-	{  22,     KEY_X        },   // B/Bomb/secondary
-	{  23,     KEY_R        },   // Credit
-	{  18,     KEY_Q        },   // Start 1P
-	{  -1,     -1           } }, // END OF LIST, DO NOT CHANGE
-	// MAME must be configured with 'z' & 'x' as buttons 1 & 2 -
-	// this was required for the accompanying 'menu' utility to
-	// work (catching crtl/alt w/ncurses gets totally NASTY).
-	// Credit/start are likewise moved to 'r' & 'q,' reason being
-	// to play nicer with certain emulators not liking numbers.
-	// GPIO options are 'maxed out' with PiTFT + above table.
-	// If additional buttons are desired, will need to disable
-	// serial console and/or use P5 header.  Or use keyboard.
-   ioStandard[] = {
-	// This pin/key table is used when the PiTFT isn't found
-	// (using HDMI or composite instead), or with newer projects
-	// such as PiGRRL 2 that "fake out" HDMI and copy it to the
-	// PiTFT screen.
-#if 0
-	// From our original Pi gaming guide:
-	// Input   Output (from /usr/include/linux/input.h)
-	{  25,     KEY_LEFT     },   // Joystick (4 pins)
-	{   9,     KEY_RIGHT    },
-	{  10,     KEY_UP       },
-	{  17,     KEY_DOWN     },
-	{  23,     KEY_LEFTCTRL },   // A/Fire/jump/primary
-	{   7,     KEY_LEFTALT  },   // B/Bomb/secondary
-	// For credit/start/etc., use USB keyboard or add more buttons.
-#else
-	// For PiGRRL 2:
-	// Input   Output (from /usr/include/linux/input.h)
-	{   4,     KEY_LEFT     }, // Joystick (4 pins)
-	{  19,     KEY_RIGHT    },
-	{  16,     KEY_UP       },
-	{  26,     KEY_DOWN     },
-	{  14,     KEY_LEFTCTRL }, // A/Fire/jump/primary/RED
-	{  15,     KEY_LEFTALT  }, // B/Bomb/secondary/YELLOW
-	{  20,     KEY_Z        }, // X/BLUE
-	{  18,     KEY_X        }, // Y/GREEN
-	{   5,     KEY_SPACE    }, // Select
-	{   6,     KEY_ENTER    }, // Start
-	{  12,     KEY_A        }, // L Shoulder
-	{  13,     KEY_S        }, // R Shoulder
-	{  17,     KEY_ESC      }, // Exit ROM PiTFT Button 1
-	{  22,     KEY_1        }, // PiTFT Button 2
-	{  23,     KEY_2        }, // PiTFT Button 3
-	{  27,     KEY_3        }, // PiTFT Button 4
-#endif
-	{  -1,     -1           } }; // END OF LIST, DO NOT CHANGE
-
-// A "Vulcan nerve pinch" (holding down a specific button combination
-// for a few seconds) issues an 'esc' keypress to MAME (which brings up
-// an exit menu or quits the current game).  The button combo is
-// configured with a bitmask corresponding to elements in the above io[]
-// array.  The default value here uses GPIO pins 23 and 18 (credit and
-// start in the Cupcade pinout).  If you change this, make certain it's
-// a combo that's not likely to occur during actual gameplay (i.e. avoid
-// using joystick directions or hold-for-rapid-fire buttons).
-// Also key auto-repeat times are set here.  This is for navigating the
-// game menu using the 'gamera' utility; MAME disregards key repeat
-// events (as it should).
-const unsigned long vulcanMask = (1L << 23) | (1L << 18);
-const int           vulcanKey  = KEY_ESC, // Keycode to send
-                    vulcanTime = 1500,    // Pinch time in milliseconds
-                    repTime1   = 500,     // Key hold time to begin repeat
-                    repTime2   = 100;     // Time between key repetitions
-
+bool
+   running      = true;              // Signal handler will set false (exit)
+extern char
+  *__progname,                       // Program name (for error reporting)
+  *program_invocation_name;          // Full name as invoked (path, etc.)
+char
+   sysfs_root[] = "/sys/class/gpio", // Location of Sysfs GPIO files
+  *cfgPath,                          // Directory containing config file
+  *cfgName      = NULL,              // Name (no path) of config
+  *cfgPathname,                      // Full path/name to config file
+   board;                            // 0=Pi1Rev1, 1=Pi1Rev2, 2=Pi2/Pi3
+int
+   key[32],                          // Keycodes assigned to GPIO pins
+   fileWatch,                        // inotify file descriptor
+   intstate[32],                     // Button last-read state
+   extstate[32],                     // Button debounced state
+   keyfd1       = -1,                // /dev/uinput file descriptor
+   keyfd2       = -1,                // /dev/input/eventX file descriptor
+   keyfd        = -1,                // = (keyfd2 >= 0) ? keyfd2 : keyfd1;
+   vulcanKey    = KEY_RESERVED,      // 'Vulcan pinch' keycode to send
+   vulcanTime   = 1500,              // Pinch time in milliseconds
+   debounceTime = 20,                // 20 ms for button debouncing
+   repTime1     = 500,               // Key hold time to begin repeat
+   repTime2     = 100;               // Time between key repetitions
+   // Note: auto-repeat is for navigating the game-selection menu using the
+   // 'gamera' utility; MAME disregards key repeat events (as it should).
+uint32_t
+   vulcanMask   = 0;                 // Bitmask of 'Vulcan nerve pinch' combo
+volatile unsigned int
+  *gpio;                             // GPIO register table
+struct pollfd
+   p[35];                            // File descriptors for poll()
 
 enum commandNum {
 	CMD_NONE, // Used during config file scanning (no command ID'd yet)
@@ -171,34 +116,9 @@ enum commandNum {
 dict command[] = { // Struct is defined in keyTable.h
 	{ "GND"   , CMD_GND },
 	{ "GROUND", CMD_GND },
+	// Might add commands here for fine-tuning debounce & repeat settings
 	{  NULL   , -1      } // END-OF-LIST
 };
-
-// Global variables and such -----------------------------------------------
-
-extern char
-  *__progname,                       // Program name (for error reporting)
-  *program_invocation_name;          // Full name as invoked (path, etc.)
-char
-   sysfs_root[] = "/sys/class/gpio", // Location of Sysfs GPIO files
-   running      = 1,                 // Signal handler will set to 0 (exit)
-  *cfgPath,                          // Directory containing config file
-  *cfgName      = NULL,              // Name (no path) of config
-  *cfgPathname,                      // Full path/name to config file
-   board;                            // 0=Pi1Rev1, 1=Pi1Rev2, 2=Pi2/Pi3
-volatile unsigned int
-  *gpio;                             // GPIO register table
-const int
-   debounceTime = 20;                // 20 ms for button debouncing
-struct pollfd
-   p[35];                            // File descriptors for poll()
-int
-   fileWatch,                        // inotify file descriptor
-   intstate[32],                     // Button last-read state
-   extstate[32],                     // Button debounced state
-   keyfd1 = -1,                      // /dev/uinput file descriptor
-   keyfd2 = -1,                      // /dev/input/eventX file descriptor
-   keyfd  = -1;                      // = (keyfd2 >= 0) ? keyfd2 : keyfd1;
 
 #define PI1_BCM2708_PERI_BASE 0x20000000
 #define PI1_GPIO_BASE         (PI1_BCM2708_PERI_BASE + 0x200000)
@@ -207,6 +127,8 @@ int
 #define BLOCK_SIZE            (4*1024)
 #define GPPUD                 (0x94 / 4)
 #define GPPUDCLK0             (0x98 / 4)
+
+#define GND                   KEY_CNT
 
 
 // Some utility functions --------------------------------------------------
@@ -288,16 +210,15 @@ static void pull(int bitmask, int state) {
 // don't leave any filesystem cruft; restore any GND pins to inputs and
 // disable previously-set pull-ups.  Write errors are ignored as pins may be
 // in a partially-initialized state.
-static void unloadPinConfig() {
+static void pinConfigUnload() {
 	char buf[50];
-	int  fd, i, j, bitmask;
+	int  fd, i;
 
 	// Close GPIO file descriptors
 	for(i=0; i<32; i++) {
 		if(p[i].fd >= 0) {
 			close(p[i].fd);
 			p[i].fd = -1;
-			intstate[i] = extstate[i] = 0;
 		}
 		p[i].events = p[i].revents = 0;
 	}
@@ -317,28 +238,35 @@ static void unloadPinConfig() {
 	// Un-export pins
 	sprintf(buf, "%s/unexport", sysfs_root);
 	if((fd = open(buf, O_WRONLY)) >= 0) {
-		for(i=0; io[i].pin >= 0; i++) {
+		for(i=0; i<32; i++) {
 			// Restore GND items to inputs
-			if(io[i].key == GND)
-				pinSetup(io[i].pin, "direction", "in");
+			if(key[i] >= GND) pinSetup(i, "direction", "in");
 			// And un-export all items regardless
-			sprintf(buf, "%d", io[i].pin);
+			sprintf(buf, "%d", i);
 			write(fd, buf, strlen(buf));
 		}
 		close(fd);
 	}
 
-	// Disable pullups
-	for(bitmask=i=0; (j=io[i].pin) >= 0; i++) // Bitmap of pullup pins
-		if(io[i].key != GND) bitmask |= (1 << j);
-	pull(bitmask, 0); // Disable pullups
+	for(i=0; i<32; i++) {
+		if((key[i] > KEY_RESERVED) && (key[i] < GND))
+			vulcanMask |= (1 << i);
+	}
+	pull(vulcanMask, 0); // Disable pullups
+
+	// Reset pin-and-key-related globals
+	for(i=0; i<32; i++) key[i] = KEY_RESERVED;
+	memset(intstate, 0, sizeof(intstate));
+	memset(extstate, 0, sizeof(intstate));
+	vulcanMask = 0;
+	vulcanKey  = KEY_RESERVED;
 }
 
 // Quick-n-dirty error reporter; print message, clean up and exit.
 static void err(char *msg) {
 	printf("%s: %s.  Try 'sudo %s'.\n", __progname, msg,
 	  program_invocation_name);
-	unloadPinConfig();
+	pinConfigUnload();
 	exit(1);
 }
 
@@ -375,21 +303,11 @@ static int dictSearch(char *str, dict *d) {
 	return d[i].value;
 }
 
+
+// Config file handlage ----------------------------------------------------
+
 // Load pin/key configuration from cfgPathname.
-static void loadPinConfig() {
-
-	FILE *fp;
-	char  buf[50];
-	int   i, j, fd, bitmask;
-
-	// -----------------------------------------------------------------
-
-#if 0
-	if(NULL == (fp = fopen(cfgPathname, "r"))) {
-		printf("%s: error opening config file '%s'\n",
-		  __progname, cfgPathname);
-		return; // Not fatal; file can still be created
-	}
+static void pinConfigLoad() {
 
 	// Config file format is super simple, just per-line keyword and
 	// argument(s) with whitespace delimiters...can parse it ourselves
@@ -397,14 +315,24 @@ static void loadPinConfig() {
 	// have some potent features but enforce a correspondingly more
 	// exacting syntax on the user; do not want if we can avoid it.
 
-	enum     commandNum cmd = CMD_NONE;
-	int      stringLen      = 0,
-	         wordCount      = 0,
-	         keyCode        = KEY_RESERVED,
-	         c, k;
-	bool     readingString  = false,
-	         isComment      = false;
-	uint32_t pinMask        = 0;
+	FILE            *fp;
+	char             buf[50];
+	enum commandNum  cmd = CMD_NONE;
+	int              stringLen      = 0,
+	                 wordCount      = 0,
+	                 keyCode        = KEY_RESERVED,
+	                 i, c, k, fd, bitmask;
+	bool             readingString  = false,
+	                 isComment      = false;
+	uint32_t         pinMask        = 0;
+
+	// Read config file into key[] table -------------------------------
+
+	if(NULL == (fp = fopen(cfgPathname, "r"))) {
+		printf("%s: could not open config file '%s'\n",
+		   __progname, cfgPathname);
+		return; // Not fatal; file might be created later
+	}
 
 	do {
 		c = getc(fp);
@@ -437,8 +365,11 @@ static void loadPinConfig() {
 					}
 				} else {
 					// Word #2+ on line;
-					// Certain commands may
-					// accumulate values.
+					// Certain commands may accumulate
+					// values.  At the moment, just pin
+					// numbers; this code will need
+					// revision if other argument types
+					// happen later (e.g. timeouts).
 					char *endptr;
 					int   pinNum;
 					pinNum = strtol(buf, &endptr, 0);
@@ -463,17 +394,26 @@ static void loadPinConfig() {
 				// Execute last line if useful command
 				switch(cmd) {
 				   case CMD_KEY:
-// If one bit set, is simple button press,
-// If multiple bits, is Vulcan nerve pinch.
-//printf("KEY CODE %d\n", keyCode);
-//printf("pin mask %04x\n", pinMask);
-// Overwrite old keycode assigned to pin, or clear GND assigned to pin
+					// Count number of pins on line
+					for(k=i=0; i<32; i++) {
+						if(pinMask & (1 << i)) k++;
+					}
+					if(k == 1) {
+						for(i=0;!(pinMask&(1<<i));i++);
+						key[i] = keyCode;
+					} else if(k > 1) {
+						vulcanMask = pinMask;
+						vulcanKey  = keyCode;
+					}
 					break;
 				   case CMD_GND:
-// One or multiple bits, doesn't matter.
-//printf("GND\n");
-//printf("pin mask %04x\n", pinMask);
-// Overwrite any keycode assigned to pin
+					// One or more GND pins
+					for(i=0; i<32; i++) {
+						if(pinMask & (1 << i)) {
+							key[i] = GND;
+						}
+					}
+					vulcanMask &= ~pinMask;
 					break;
 				   default:
 					break;
@@ -508,48 +448,59 @@ static void loadPinConfig() {
 	} while(c > 0);
 
 	fclose(fp);
-#endif
 
-	// -----------------------------------------------------------------
+	// If this is a "Revision 1" Pi board (no mounting holes),
+	// remap certain pin numbers for compatibility.  Can then use
+	// 'modern' pin numbers regardless of board type.
+	if(board == 0) {
+		key[0]  = key[2];  // GPIO2 -> GPIO0
+		key[1]  = key[3];  // etc.
+		key[21] = key[27];
+		key[2]  = key[3] = key[27] = KEY_RESERVED;
+	}
 
-	// THIS STILL WORKS FROM THE io[] array -- config file handling is
-	// still a work in progress and doesn't do anything yet.
+	// Set up GPIO from key[] table ------------------------------------
 
-	// Make combined bitmap of pullup-enabled pins:
-	for(bitmask=i=0; (j=io[i].pin) >= 0; i++)
-		if(io[i].key != GND) bitmask |= (1 << j);
-	pull(bitmask, 2); // Enable pullups
+	bitmask = vulcanMask;
+	for(i=0; i<32; i++) {
+		if((key[i] > KEY_RESERVED) && (key[i] < GND))
+			bitmask |= (1 << i);
+	}
+	pull(bitmask, 2); // Enable pullups on input pins
+	if(!vulcanMask) vulcanKey = KEY_RESERVED;
 
 	// All other GPIO config is handled through the sysfs interface.
 
 	sprintf(buf, "%s/export", sysfs_root);
 	if((fd = open(buf, O_WRONLY)) < 0) // Open Sysfs export file
 		err("Can't open GPIO export file");
-	for(i=0; (j=io[i].pin) >= 0; i++) { // For each pin of interest...
-		sprintf(buf, "%d", j);
+	for(i=0; i<32; i++) {
+		if((key[i] == KEY_RESERVED) && !(vulcanMask & (1<<i)))
+			continue;
+		sprintf(buf, "%d", i);
 		write(fd, buf, strlen(buf));    // Export pin
-		pinSetup(j, "active_low", "0"); // Don't invert
-		if(io[i].key == GND) {
+		pinSetup(i, "active_low", "0"); // Don't invert
+		if(key[i] >= GND) {
 			// Set pin to output, value 0 (ground)
-			if(pinSetup(j, "direction", "out") ||
-			   pinSetup(j, "value"    , "0"))
+			if(pinSetup(i, "direction", "out") ||
+			   pinSetup(i, "value"    , "0"))
 				err("Pin config failed (GND)");
 		} else {
 			// Set pin to input, detect rise+fall events
 			char x;
-			if(pinSetup(j, "direction", "in") ||
-			   pinSetup(j, "edge"     , "both"))
+			if(pinSetup(i, "direction", "in") ||
+			   pinSetup(i, "edge"     , "both"))
 				err("Pin config failed");
 			// Get initial pin value
-			sprintf(buf, "%s/gpio%d/value", sysfs_root, j);
-			if((p[j].fd = open(buf, O_RDONLY)) < 0)
+			sprintf(buf, "%s/gpio%d/value", sysfs_root, i);
+			if((p[i].fd = open(buf, O_RDONLY)) < 0)
 				err("Can't access pin value");
-			intstate[j] = 0;
-			if((read(p[j].fd, &x, 1) == 1) && (x == '0'))
-				intstate[j] = 1;
-			extstate[j] = intstate[j];
-			p[j].events  = POLLPRI; // Set up poll() events
-			p[j].revents = 0;
+			intstate[i] = 0;
+			if((read(p[i].fd, &x, 1) == 1) && (x == '0'))
+				intstate[i] = 1;
+			extstate[i]  = intstate[i];
+			p[i].events  = POLLPRI; // Set up poll() events
+			p[i].revents = 0;
 		}
 	}
 	close(fd); // Done w/Sysfs exporting
@@ -559,9 +510,11 @@ static void loadPinConfig() {
 	// Attempt to create uidev virtual keyboard
 	if((keyfd1 = open("/dev/uinput", O_WRONLY | O_NONBLOCK)) >= 0) {
 		(void)ioctl(keyfd1, UI_SET_EVBIT, EV_KEY);
-		for(i=0; io[i].pin >= 0; i++) {
-			if(io[i].key != GND)
-				(void)ioctl(keyfd1, UI_SET_KEYBIT, io[i].key);
+		for(i=0; i<32; i++) {
+			if(((key[i] >= KEY_RESERVED) && (key[i] < GND)) ||
+			   (vulcanMask & (1 << i))) {
+				(void)ioctl(keyfd1, UI_SET_KEYBIT, key[i]);
+			}
 		}
 		(void)ioctl(keyfd1, UI_SET_KEYBIT, vulcanKey);
 		struct uinput_user_dev uidev;
@@ -638,7 +591,7 @@ static void loadPinConfig() {
 	keyfd2 = open(evName, O_WRONLY | O_NONBLOCK);
 	keyfd  = (keyfd2 >= 0) ? keyfd2 : keyfd1;
 	// keyfd1 and 2 are global and are held open (as a destination for
-	// key events) until unloadPinConfig() is called.
+	// key events) until pinConfigUnload() is called.
 }
 
 // Handle signal events (i=32), config file change events (33) or
@@ -652,34 +605,35 @@ static void pollHandler(int i) {
 		struct signalfd_siginfo info;
 		read(p[i].fd, &info, sizeof(info));
 		if(info.ssi_signo == SIGHUP) { // kill -1 = force reload
-			printf("SIGHUP\n");
+			// printf("SIGHUP\n");
 			// Reload config
-			unloadPinConfig();
-			loadPinConfig();
+			pinConfigUnload();
+			pinConfigLoad();
 		} else { // Other signal = abort program
-			running = 0;
+			running = false;
 		}
 	} else { // Change in config file or directory contents
 		char evBuf[1000];
-		int  evCount = 0, bufPos = 0,
+		//int  evCount = 0;
+		int  bufPos = 0,
 		     bytesRead = read(p[i].fd, evBuf, sizeof(evBuf));
 		while(bufPos < bytesRead) {
 			struct inotify_event *ev =
 			  (struct inotify_event *)&evBuf[bufPos];
 
-			printf("EVENT %d:\n", evCount++);
-			printf("\tinotify event mask: %08x\n", ev->mask);
-			printf("\tlen: %d\n", ev->len);
-			if(ev->len > 0)
-				printf("\tname: '%s'\n", ev->name);
+			//printf("EVENT %d:\n", evCount++);
+			//printf("\tinotify event mask: %08x\n", ev->mask);
+			//printf("\tlen: %d\n", ev->len);
+			//if(ev->len > 0)
+				//printf("\tname: '%s'\n", ev->name);
 
 			if(ev->mask & IN_MODIFY) {
-				puts("\tConfig file changed (reloading)");
-				unloadPinConfig();
-				loadPinConfig();
+				//puts("\tConfig file changed (reloading)");
+				pinConfigUnload();
+				pinConfigLoad();
 			} else if(ev->mask & IN_IGNORED) {
 				// Config file deleted -- stop watching it
-				puts("\tConfig file removed");
+				//puts("\tConfig file removed");
 				inotify_rm_watch(p[1].fd, fileWatch);
 				// Closing the descriptor turns out to be
 				// important, as removing the watch itself
@@ -693,10 +647,10 @@ static void pollHandler(int i) {
 			} else if(ev->mask & IN_MOVED_FROM) {
 				// File moved/renamed from directory...
 				// check if it's the one we're monitoring.
-				puts("\tFile moved or renamed");
+				//puts("\tFile moved or renamed");
 				if(!strcmp(ev->name, cfgName)) {
 					// It's our file -- stop watching it
-					puts("\tEffectively removed");
+					//puts("\tEffectively removed");
 					inotify_rm_watch(p[33].fd, fileWatch);
 					close(p[33].fd);
 					p[33].fd     = -1;
@@ -705,15 +659,15 @@ static void pollHandler(int i) {
 					// keep using prior values for now.
 				} else {
 					// Some other file -- disregard
-					puts("\tNot the file we're watching");
+					//puts("\tNot the file we're watching");
 				}
 			} else if(ev->mask & (IN_CREATE | IN_MOVED_TO)) {
 				// File moved/renamed to directory...
 				// check if it's the one we're monitoring for.
-				puts("\tNew file in directory...");
+				//puts("\tNew file in directory...");
 				if(!strcmp(ev->name, cfgName)) {
 					// It's our file -- start watching it!
-					puts("\tFile created/moved-to!");
+					//puts("\tFile created/moved-to!");
 					if(p[33].fd >= 0) { // Existing file?
 						inotify_rm_watch(
 						  p[33].fd, fileWatch);
@@ -724,11 +678,11 @@ static void pollHandler(int i) {
 					  p[33].fd, cfgPathname,
 					  IN_MODIFY | IN_IGNORED);
 					p[33].events = POLLIN;
-					unloadPinConfig();
-					loadPinConfig();
+					pinConfigUnload();
+					pinConfigLoad();
 				} else {
 					// Some other file -- disregard
-					puts("\tNot the config file.");
+					//puts("\tNot the config file.");
 				}
 			}
 
@@ -744,10 +698,10 @@ int main(int argc, char *argv[]) {
 
 	char               c;            // Pin input value ('0'/'1')
 	int                fd,           // For mmap, sysfs
-	                   i, j,         // Asst. counter
+	                   i,            // Generic counter
 	                   timeout = -1, // poll() timeout
 	                   lastKey = -1; // Last key down (for repeat)
-	unsigned long      bitMask;      // For Vulcan pinch detect
+	unsigned long      pressMask;    // For Vulcan pinch detect
 	struct input_event keyEv, synEv; // uinput events
 	sigset_t           sigset;       // Signal mask
 
@@ -791,6 +745,7 @@ int main(int argc, char *argv[]) {
 	// Clear all descriptors and GPIO state, init input event structures
 	memset(p, 0, sizeof(p));
 	for(i=0; i<35; i++) p[i].fd = -1;
+	for(i=0; i<32; i++) key[i] = KEY_RESERVED;
 	memset(intstate, 0, sizeof(intstate));
 	memset(extstate, 0, sizeof(extstate));
 	memset(&keyEv  , 0, sizeof(keyEv));
@@ -798,6 +753,8 @@ int main(int argc, char *argv[]) {
 	keyEv.type  = EV_KEY;
 	synEv.type  = EV_SYN;
 	synEv.code  = SYN_REPORT;
+	vulcanMask  = 0;
+	vulcanKey   = KEY_RESERVED;
 
 	sigfillset(&sigset);
 	sigprocmask(SIG_BLOCK, &sigset, NULL);
@@ -806,11 +763,9 @@ int main(int argc, char *argv[]) {
 	p[32].events = POLLIN;
 
 	// pollfd #33 and #34 will be used for detecting changes in the
-	// config file and its parent directory.  Config files ARE NOT
-	// YET IMPLEMENTED, but I'm working toward this incrementally.
-	// This change detection will let you edit the config and have
-	// immediate feedback without needing to kill the process or
-	// reboot the system.
+	// config file and its parent directory.  This will let you edit
+	// the config and have immediate feedback without needing to kill
+	// the process or reboot the system.
 	for(i=33; i<=34; i++) {
 		p[i].fd     = inotify_init();
 		p[i].events = POLLIN;
@@ -847,25 +802,7 @@ int main(int argc, char *argv[]) {
 	close(fd);              // Not needed after mmap()
 	if(gpio == MAP_FAILED) err("Can't mmap()");
 
-	// THIS CODE WILL BE GOING AWAY OR MOVING WHEN CONFIG FILES DONE:
-
-	// Select io[] table for Cupcade (TFT) or 'normal' project.
-	io = (access("/etc/modprobe.d/adafruit.conf", F_OK) ||
-	      access("/dev/fb1", F_OK)) ? ioStandard : ioTFT;
-
-	// If this is a "Revision 1" Pi board (no mounting holes),
-	// remap certain pin numbers in the io[] array for compatibility.
-	// This way the code doesn't need modification for old boards.
-	// Will be moved to loadPinConfig() with some changes.
-	if(board == 0) {
-		for(i=0; io[i].pin >= 0; i++) {
-			if(     io[i].pin ==  2) io[i].pin = 0;
-			else if(io[i].pin ==  3) io[i].pin = 1;
-			else if(io[i].pin == 27) io[i].pin = 21;
-		}
-	}
-
-	loadPinConfig();
+	pinConfigLoad();
 
 	// Main loop -------------------------------------------------------
 
@@ -899,20 +836,20 @@ int main(int argc, char *argv[]) {
 			c = 0; // Don't issue SYN event
 			// Else timeout occurred
 		} else if(timeout == debounceTime) { // Debounce timeout
-			bitMask = 0L; // Mask of buttons currently pressed
-			for(c=i=0; (j=io[i].pin) >= 0; i++) {
-				if(io[i].key != GND) {
+			for(pressMask=i=0; i<32; i++) {
+				if((key[i] > KEY_RESERVED) &&
+				   (key[i] < GND)) {
 					// Compare internal state against
 					// previously-issued value.  Send
 					// keys only for changed states.
-					if(intstate[j] != extstate[j]) {
-						extstate[j] = intstate[j];
-						keyEv.code  = io[i].key;
-						keyEv.value = intstate[j];
+					if(intstate[i] != extstate[i]) {
+						extstate[i] = intstate[i];
+						keyEv.code  = key[i];
+						keyEv.value = intstate[i];
 						write(keyfd, &keyEv,
 						  sizeof(keyEv));
 						c = 1; // Follow w/SYN event
-						if(intstate[j]) { // Press?
+						if(intstate[i]) { // Press?
 							// Note pressed key
 							// and set initial
 							// repeat interval.
@@ -927,14 +864,14 @@ int main(int argc, char *argv[]) {
 							  -1;
 						}
 					}
-					if(intstate[j]) bitMask |= (1 << j);
+					if(intstate[i]) pressMask |= (1<<i);
 				}
 			}
 
 			// If the "Vulcan nerve pinch" buttons are pressed,
 			// set long timeout -- if this time elapses without
 			// a button state change, esc keypress will be sent.
-			if((bitMask & vulcanMask) == vulcanMask)
+			if((pressMask & vulcanMask) == vulcanMask)
 				timeout = vulcanTime;
 		} else if(timeout == vulcanTime) { // Vulcan key timeout
 			// Send keycode (MAME exits or displays exit menu)
@@ -952,7 +889,7 @@ int main(int argc, char *argv[]) {
 			if(timeout == repTime1) timeout = repTime2;
 			else if(timeout > 30)   timeout -= 5; // Accelerate
 			c           = 1; // Follow w/SYN event
-			keyEv.code  = io[lastKey].key;
+			keyEv.code  = key[lastKey];
 			keyEv.value = 2; // Key repeat event
 			write(keyfd, &keyEv, sizeof(keyEv));
 		}
@@ -961,12 +898,9 @@ int main(int argc, char *argv[]) {
 
 	// Clean up --------------------------------------------------------
 
-	unloadPinConfig(); // Close uinput, un-export pins
+	pinConfigUnload(); // Close uinput, un-export pins
 
 	puts("Done.");
 
 	return 0;
 }
-
-
-

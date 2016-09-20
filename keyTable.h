@@ -120,6 +120,7 @@ dict keyTable[] = {
 	{ "INSERT", KEY_INSERT },
 	{ "DELETE", KEY_DELETE },
 	{ "MACRO", KEY_MACRO },
+#if 0 // Esoteric keys disabled, smaller program size; edit if needed
 	{ "MUTE", KEY_MUTE },
 	{ "VOLUMEDOWN", KEY_VOLUMEDOWN },
 	{ "VOLUMEUP", KEY_VOLUMEUP },
@@ -428,5 +429,6 @@ dict keyTable[] = {
 	{ "MIN_INTERESTING", KEY_MIN_INTERESTING },
 	{ "MAX", KEY_MAX },
 	{ "CNT", KEY_CNT },
+#endif
 	{ NULL, -1 } // END-OF-LIST
 };
