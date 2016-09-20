@@ -1,13 +1,15 @@
 Adafruit-Retrogame
 ==================
 
-Raspberry Pi GPIO-to-USB utility for classic game emulators.
+Raspberry Pi GPIO-to-virtual-keyboard utility for classic game emulators.
+
+How-to: https://learn.adafruit.com/retro-gaming-with-raspberry-pi
 
 ### NEW: Configuration file
 
 retrogame now loads its pin/key settings from a file; no code editing required. An example file 'retrogame.cfg' is included, copy this to the /boot directory so retrogame can find it (/boot makes it easier to edit with the card in a reader on another system). Alternately, an absolute pathname to a settings file can be passed on the command line. This file can be edited live, no need to restart retrogame after making changes.
 
-THE ioStandard[] AND ioTFT[] TABLES NO LONGER EXIST IN THE SOURCE CODE. You should not need to edit any code to make retrogame work. Everything is handled through the configuration file now. Some guides may be out of date and still refer to the old way; these will be updated over time.
+__THE ioStandard[] AND ioTFT[] TABLES NO LONGER EXIST IN THE SOURCE CODE. You should not need to edit any code to make retrogame work.__ Everything is handled through the configuration file now. Some guides may be out of date and still refer to the old way; these will be updated over time.
 
 ### RetroPie 2.0+ Compatibility
 
