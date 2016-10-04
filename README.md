@@ -5,6 +5,12 @@ Raspberry Pi GPIO-to-virtual-keyboard utility for classic game emulators.
 
 How-to: https://learn.adafruit.com/retro-gaming-with-raspberry-pi
 
+### NEED HELP?
+
+__Visit forums.adafruit.com (General Project Help) for questions.__ GitHub's "Issues" tab is for bug reports and feature requests. __99% of retrogame problems are configuration, not bugs.__
+
+When requesting help, please be thorough in your description. Which model of Raspberry Pi, what release of RetroPie (or other OS image), and (if the trouble is localized) which system emulator exactly? Thanks!
+
 ### NEW: Configuration file
 
 retrogame now loads its pin/key settings from a file; no code editing required. An example file 'retrogame.cfg' is included, copy this to the /boot directory so retrogame can find it (/boot makes it easier to edit with the card in a reader on another system). Alternately, an absolute pathname to a settings file can be passed on the command line. This file can be edited live, no need to restart retrogame after making changes.
