@@ -7,7 +7,7 @@ How-to: https://learn.adafruit.com/retro-gaming-with-raspberry-pi
 
 ### NEED HELP?
 
-__Visit forums.adafruit.com (General Project Help) for questions.__ GitHub's "Issues" tab is for bug reports and feature requests. __99% of retrogame problems are configuration, not bugs.__
+__Visit forums.adafruit.com (General Project Help) for questions.__ GitHub's "Issues" tab is for bug reports and feature requests. __99% of retrogame problems are configuration, not bugs.__ Make sure to follow the "RetroPie 2.0+ Compatibility" directions below.
 
 When requesting help, please be thorough in your description. Which model of Raspberry Pi, what release of RetroPie (or other OS image), and (if the trouble is localized) which system emulator exactly? Thanks!
 
