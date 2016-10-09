@@ -83,7 +83,9 @@ char
   *cfgPath,                          // Directory containing config file
   *cfgName      = NULL,              // Name (no path) of config
   *cfgPathname,                      // Full path/name to config file
-   board;                            // 0=Pi1Rev1, 1=Pi1Rev2, 2=Pi2/Pi3
+   board,                            // 0=Pi1Rev1, 1=Pi1Rev2, 2=Pi2/Pi3
+   debug        = 0,                 // 0=off, 1=cfg file, 2=live buttons
+   startupDebug = 0;                 // Initial debug level before cfg load
 int
    key[32],                          // Keycodes assigned to GPIO pins
    fileWatch,                        // inotify file descriptor
@@ -102,22 +104,24 @@ int
 uint32_t
    vulcanMask   = 0;                 // Bitmask of 'Vulcan nerve pinch' combo
 volatile unsigned int
-  *gpio;                             // GPIO register table
+  *gpio         = NULL;              // GPIO register table
 struct pollfd
    p[35];                            // File descriptors for poll()
 
 enum commandNum {
 	CMD_NONE, // Used during config file scanning (no command ID'd yet)
 	CMD_KEY,  // Key-to-GPIO mapping command
-	CMD_GND   // Pin-to-ground assignment
+	CMD_GND,  // Pin-to-ground assignment
+	CMD_DEBUG // Set debug level
 };
 
 // dict of config file commands that AREN'T keys (KEY_*)
 dict command[] = { // Struct is defined in keyTable.h
-	{ "GND"   , CMD_GND },
-	{ "GROUND", CMD_GND },
+	{ "GND"   , CMD_GND   },
+	{ "GROUND", CMD_GND   },
+	{ "DEBUG" , CMD_DEBUG },
 	// Might add commands here for fine-tuning debounce & repeat settings
-	{  NULL   , -1      } // END-OF-LIST
+	{  NULL   , -1        } // END-OF-LIST
 };
 
 #define PI1_BCM2708_PERI_BASE 0x20000000
@@ -129,6 +133,9 @@ dict command[] = { // Struct is defined in keyTable.h
 #define GPPUDCLK0             (0x98 / 4)
 
 #define GND                   KEY_CNT
+
+// Debug levels: 0 = off, 1 = config file errors, 2 = + config file status,
+// 3 = + report button states 'live'.
 
 
 // Some utility functions --------------------------------------------------
@@ -214,6 +221,8 @@ static void pinConfigUnload() {
 	char buf[50];
 	int  fd, i;
 
+	if(debug >= 2) printf("%s: Unloading config\n", __progname);
+
 	// Close GPIO file descriptors
 	for(i=0; i<32; i++) {
 		if(p[i].fd >= 0) {
@@ -264,9 +273,9 @@ static void pinConfigUnload() {
 
 // Quick-n-dirty error reporter; print message, clean up and exit.
 static void err(char *msg) {
-	printf("%s: %s.  Try 'sudo %s'.\n", __progname, msg,
+	printf("%s: %s.  Try 'sudo %s' ?\n", __progname, msg,
 	  program_invocation_name);
-	pinConfigUnload();
+	if(gpio) pinConfigUnload();
 	exit(1);
 }
 
@@ -321,16 +330,18 @@ static void pinConfigLoad() {
 	int              stringLen      = 0,
 	                 wordCount      = 0,
 	                 keyCode        = KEY_RESERVED,
-	                 i, c, k, fd, bitmask;
+	                 i, c, k, fd, bitmask, dLevel = -1;
 	bool             readingString  = false,
 	                 isComment      = false;
 	uint32_t         pinMask        = 0;
 
+	if(debug >= 2) printf("%s: Loading config\n", __progname);
+
 	// Read config file into key[] table -------------------------------
 
 	if(NULL == (fp = fopen(cfgPathname, "r"))) {
-		printf("%s: could not open config file '%s'\n",
-		   __progname, cfgPathname);
+		if(debug >= 1) printf("%s: could not open config file '%s' "
+		  "(not fatal, continuing)\n", __progname, cfgPathname);
 		return; // Not fatal; file might be created later
 	}
 
@@ -355,9 +366,9 @@ static void pinConfigLoad() {
 					} else if((k = dictSearch(buf,
 					  command)) >= 0) {
 						// Not a key, is other
-						// command (e.g. GND)
+						// command (e.g. GND, DEBUG)
 						cmd = k;
-					} else {
+					} else if(debug >= 1) {
 						printf("%s: unknown key or "
 						  "command '%s' (not fatal, "
 						  "continuing)\n",
@@ -366,26 +377,57 @@ static void pinConfigLoad() {
 				} else {
 					// Word #2+ on line;
 					// Certain commands may accumulate
-					// values.  At the moment, just pin
-					// numbers; this code will need
-					// revision if other argument types
-					// happen later (e.g. timeouts).
+					// values (e.g. keys w/pinch).
 					char *endptr;
-					int   pinNum;
-					pinNum = strtol(buf, &endptr, 0);
-					if((*endptr) || (pinNum < 0) ||
-					  (pinNum > 31)) {
-						// Non-NUL character
-						// indicates not entire
-						// string was translated,
-						// i.e. bad numeric input.
-						printf("%s: invalid pin "
-						  "'%s' (not fatal, "
-						  "continuing)\n",
-						  __progname, buf);
-					} else {
-						// Add pin # to list
-						pinMask |= (1 << pinNum);
+					int   arg;
+					arg = strtol(buf, &endptr, 0);
+					switch(cmd) {
+					   case CMD_KEY:
+					   case CMD_GND:
+						if((*endptr) || (arg < 0) ||
+						  (arg > 31)) {
+							// Non-NUL character
+							// indicates not full
+							// string was parsed,
+							// i.e. bad numeric
+							// input.
+							if(debug >= 1) {
+								printf("%s: "
+								  "invalid "
+								  "pin '%s' "
+								  "(not "
+								  "fatal, "
+								  "continuing)"
+								  "\n",
+								  __progname,
+								  buf);
+							}
+						} else {
+							// Add pin # to list
+							pinMask |= (1 << arg);
+						}
+						break;
+					   case CMD_DEBUG:
+						if((*endptr) || (arg < 0) ||
+						  (arg > 3)) {
+							if(debug >= 1) {
+								printf("%s: "
+								  "invalid "
+								  "debug "
+								  "level '%s' "
+								  "(not "
+								  "fatal, "
+								  "continuing)"
+								  "\n",
+								  __progname,
+								  buf);
+							}
+						} else {
+							dLevel = arg;
+						}
+						break;
+					   default:
+						break;
 					}
 				}
 				readingString = false;
@@ -401,9 +443,24 @@ static void pinConfigLoad() {
 					if(k == 1) {
 						for(i=0;!(pinMask&(1<<i));i++);
 						key[i] = keyCode;
+						if(debug >= 2) {
+							printf("%s: virtual "
+							  "key %d assigned "
+							  "to GPIO%02d\n",
+							  __progname,
+							  keyCode, i);
+						}
 					} else if(k > 1) {
 						vulcanMask = pinMask;
 						vulcanKey  = keyCode;
+						if(debug >= 2) {
+							printf("%s: virtual "
+							  "key %d has GPIO "
+							  "bitmask %04X\n",
+							  __progname,
+							  vulcanKey,
+							  vulcanMask);
+						}
 					}
 					break;
 				   case CMD_GND:
@@ -411,9 +468,24 @@ static void pinConfigLoad() {
 					for(i=0; i<32; i++) {
 						if(pinMask & (1 << i)) {
 							key[i] = GND;
+							if(debug >= 2) {
+								printf("%s: "
+								  "GPIO%02d "
+								  "assigned "
+								  "GND\n",
+								  __progname,
+								  i);
+							}
 						}
 					}
 					vulcanMask &= ~pinMask;
+					break;
+				   case CMD_DEBUG:
+					if(debug || (dLevel > 0)) {
+						printf("%s: debug level %d\n",
+						  __progname, dLevel);
+					}
+					debug = dLevel;
 					break;
 				   default:
 					break;
@@ -448,6 +520,14 @@ static void pinConfigLoad() {
 	} while(c > 0);
 
 	fclose(fp);
+
+	// If debug was previously set (either in file or by starting
+	// in foreground) but line is now deleted, set debug level to
+	// whatever its startup case was.
+	if(debug && (dLevel < 0)) {
+		debug = startupDebug;
+		printf("%s: debug level %d\n", __progname, debug);
+	}
 
 	// If this is a "Revision 1" Pi board (no mounting holes),
 	// remap certain pin numbers for compatibility.  Can then use
@@ -528,6 +608,7 @@ static void pinConfigLoad() {
 			err("write failed");
 		if(ioctl(keyfd1, UI_DEV_CREATE) < 0)
 			err("DEV_CREATE failed");
+		if(debug >= 3) printf("%s: uidev init OK\n", __progname);
 	}
 
 	// SDL2 (used by some newer emulators) wants /dev/input/eventX
@@ -592,6 +673,7 @@ static void pinConfigLoad() {
 	keyfd  = (keyfd2 >= 0) ? keyfd2 : keyfd1;
 	// keyfd1 and 2 are global and are held open (as a destination for
 	// key events) until pinConfigUnload() is called.
+	if((debug >= 3) && keyfd2) printf("%s: SDL2 init OK\n", __progname);
 }
 
 // Handle signal events (i=32), config file change events (33) or
@@ -605,8 +687,10 @@ static void pollHandler(int i) {
 		struct signalfd_siginfo info;
 		read(p[i].fd, &info, sizeof(info));
 		if(info.ssi_signo == SIGHUP) { // kill -1 = force reload
-			// printf("SIGHUP\n");
-			// Reload config
+			if(debug >= 2) {
+				printf("%s: SIGHUP received; force config "
+				  "reload\n", __progname);
+			}
 			pinConfigUnload();
 			pinConfigLoad();
 		} else { // Other signal = abort program
@@ -628,12 +712,18 @@ static void pollHandler(int i) {
 				//printf("\tname: '%s'\n", ev->name);
 
 			if(ev->mask & IN_MODIFY) {
-				//puts("\tConfig file changed (reloading)");
+				if(debug >= 2) {
+					printf("%s: Config file changed\n",
+					  __progname);
+				}
 				pinConfigUnload();
 				pinConfigLoad();
 			} else if(ev->mask & IN_IGNORED) {
 				// Config file deleted -- stop watching it
-				//puts("\tConfig file removed");
+				if(debug >= 2) {
+					printf("%s: Config file removed\n",
+					  __progname);
+				}
 				inotify_rm_watch(p[1].fd, fileWatch);
 				// Closing the descriptor turns out to be
 				// important, as removing the watch itself
@@ -647,10 +737,12 @@ static void pollHandler(int i) {
 			} else if(ev->mask & IN_MOVED_FROM) {
 				// File moved/renamed from directory...
 				// check if it's the one we're monitoring.
-				//puts("\tFile moved or renamed");
 				if(!strcmp(ev->name, cfgName)) {
 					// It's our file -- stop watching it
-					//puts("\tEffectively removed");
+					if(debug >= 2) {
+						printf("%s: Config file "
+						  "moved out\n", __progname);
+					}
 					inotify_rm_watch(p[33].fd, fileWatch);
 					close(p[33].fd);
 					p[33].fd     = -1;
@@ -659,15 +751,16 @@ static void pollHandler(int i) {
 					// keep using prior values for now.
 				} else {
 					// Some other file -- disregard
-					//puts("\tNot the file we're watching");
 				}
 			} else if(ev->mask & (IN_CREATE | IN_MOVED_TO)) {
 				// File moved/renamed to directory...
 				// check if it's the one we're monitoring for.
-				//puts("\tNew file in directory...");
 				if(!strcmp(ev->name, cfgName)) {
 					// It's our file -- start watching it!
-					//puts("\tFile created/moved-to!");
+					if(debug >= 2) {
+						printf("%s: Config file "
+						  "moved in\n", __progname);
+					}
 					if(p[33].fd >= 0) { // Existing file?
 						inotify_rm_watch(
 						  p[33].fd, fileWatch);
@@ -682,7 +775,6 @@ static void pollHandler(int i) {
 					pinConfigLoad();
 				} else {
 					// Some other file -- disregard
-					//puts("\tNot the config file.");
 				}
 			}
 
@@ -704,6 +796,9 @@ int main(int argc, char *argv[]) {
 	unsigned long      pressMask;    // For Vulcan pinch detect
 	struct input_event keyEv, synEv; // uinput events
 	sigset_t           sigset;       // Signal mask
+
+	// If in foreground, set max debug level (config may override)
+	if(getpgrp() == tcgetpgrp(STDOUT_FILENO)) startupDebug = debug = 99;
 
 	// Locate configuration file (if any) and path ---------------------
 
@@ -739,6 +834,10 @@ int main(int argc, char *argv[]) {
 		sprintf(cfgPathname, "%s/%s.cfg", cfgPath, __progname);
 	}
 	if(!cfgName) cfgName = &cfgPathname[strlen(cfgPath) + 1];
+
+	if(debug) {
+		printf("%s: Config file is '%s'\n", __progname, cfgPathname);
+	}
 
 	// Catch signals, config file changes ------------------------------
 
@@ -781,6 +880,10 @@ int main(int argc, char *argv[]) {
 	// GPIO startup ----------------------------------------------------
 
 	board = boardType();
+	if(debug) {
+		printf("%s: Board is %s-core\n", __progname,
+		  (board == 2) ? "multi" : "single");
+	}
 
 	// Although Sysfs provides solid GPIO interrupt handling, there's
 	// no interface to the internal pull-up resistors (this is by
@@ -809,6 +912,8 @@ int main(int argc, char *argv[]) {
 	// Monitor GPIO file descriptors for button events.  The poll()
 	// function watches for GPIO IRQs in this case; it is NOT
 	// continually polling the pins!  Processor load is near zero.
+
+	if(debug) printf("%s: Entering main loop\n", __progname);
 
 	while(running) { // Signal handler will set this to 0 to exit
 		// Wait for IRQ on pin (or timeout for button debounce)
@@ -855,6 +960,14 @@ int main(int argc, char *argv[]) {
 							// repeat interval.
 							lastKey = i;
 							timeout = repTime1;
+							if(debug >= 3) {
+								printf("%s: "
+								  "GPIO%02d "
+								  "key press "
+								  "code %d\n",
+								  __progname,
+								  i, key[i]);
+							}
 						} else { // Release?
 							// Stop repeat and
 							// return to normal
@@ -862,6 +975,15 @@ int main(int argc, char *argv[]) {
 							// (no timeout).
 							lastKey = timeout =
 							  -1;
+							if(debug >= 3) {
+								printf("%s: "
+								  "GPIO%02d "
+								  "key "
+								  "release "
+								  "code %d\n",
+								  __progname,
+								  i, key[i]);
+							}
 						}
 					}
 					if(intstate[i]) pressMask |= (1<<i);
@@ -871,11 +993,18 @@ int main(int argc, char *argv[]) {
 			// If the "Vulcan nerve pinch" buttons are pressed,
 			// set long timeout -- if this time elapses without
 			// a button state change, esc keypress will be sent.
-			if((pressMask & vulcanMask) == vulcanMask)
+			if(vulcanMask &&
+			  ((pressMask & vulcanMask) == vulcanMask)) {
 				timeout = vulcanTime;
+			}
 		} else if(timeout == vulcanTime) { // Vulcan key timeout
 			// Send keycode (MAME exits or displays exit menu)
 			keyEv.code = vulcanKey;
+			if(debug >= 3) {
+				printf("%s: GPIO combo %04X press, release "
+				  "code %d\n", __progname, vulcanMask,
+				  vulcanKey);
+			}
 			for(i=1; i>= 0; i--) { // Press, release
 				keyEv.value = i;
 				write(keyfd, &keyEv, sizeof(keyEv));
@@ -891,6 +1020,10 @@ int main(int argc, char *argv[]) {
 			c           = 1; // Follow w/SYN event
 			keyEv.code  = key[lastKey];
 			keyEv.value = 2; // Key repeat event
+			if(debug >= 3) {
+				printf("%s: repeating key code %d\n",
+				  __progname, keyEv.code);
+			}
 			write(keyfd, &keyEv, sizeof(keyEv));
 		}
 		if(c) write(keyfd, &synEv, sizeof(synEv));
@@ -900,7 +1033,7 @@ int main(int argc, char *argv[]) {
 
 	pinConfigUnload(); // Close uinput, un-export pins
 
-	puts("Done.");
+	if(debug) printf("%s: Done.", __progname);
 
 	return 0;
 }
