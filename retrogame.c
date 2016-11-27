@@ -758,11 +758,11 @@ static void pinConfigLoad() {
 	    uint8_t j;
 	    inputMask = gndMask = 0; // Bitmasks of keys, gnds on this device
 	    for(j=0; j<16; j++) { // 16 bits per MCP
-	      inputMask <<= 1;
-	      gndMask   <<= 1;
+	      inputMask >>= 1;
+	      gndMask   >>= 1;
 	      k = key[32 + i * 16 + j];
-	      if(k == GND)              gndMask++;
-	      else if(k > KEY_RESERVED) inputMask++;
+	      if(k == GND)              gndMask   |= 0x8000;
+	      else if(k > KEY_RESERVED) inputMask |= 0x8000;
 	    }
 
 	    if(inputMask || gndMask) { // Referenced in config?
