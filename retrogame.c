@@ -299,8 +299,9 @@ static void pinConfigUnload() {
 			uint8_t  j;
 			uint16_t gndMask = 0;
 			for(j=0; j<16; j++) { // 16 bits per MCP
-				gndMask <<= 1;
-				if(key[32 + i * 16 + j] == GND) gndMask++;
+				gndMask >>= 1;
+				if(key[32 + i * 16 + j] == GND)
+				  gndMask |= 0x8000;
 			}
 			// Read chip config
 			uint8_t cfg[3];
