@@ -15,7 +15,7 @@ For emulation-related questions (e.g. individual games not working), please use 
 
 ### NEW: Configuration file
 
-retrogame now loads its pin/key settings from a file; no code editing required. An example file 'retrogame.cfg' is included, copy this to the /boot directory so retrogame can find it (/boot makes it easier to edit with the card in a reader on another system). Alternately, an absolute pathname to a settings file can be passed on the command line. This file can be edited live, no need to restart retrogame after making changes.
+retrogame now loads its pin/key settings from a file; no code editing required. An example file 'retrogame.cfg' is included in the 'configs' directory, copy this file to the /boot directory so retrogame can find it (/boot makes it easier to edit with the card in a reader on another system). Alternately, an absolute pathname to a settings file can be passed on the command line. This file can be edited live, no need to restart retrogame after making changes.
 
 __THE ioStandard[] AND ioTFT[] TABLES NO LONGER EXIST IN THE SOURCE CODE. You should not need to edit any code to make retrogame work.__ Everything is handled through the configuration file now. Some guides may be out of date and still refer to the old way; these will be updated over time.
 

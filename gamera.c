@@ -1,4 +1,9 @@
 /*
+DEPRECATED CODE - better handled by EmulationStation now.
+This code was a ROM file selector for MAME + fceu.
+Keeping it here for now in case any Cupcade users need it.
+
+
 gamera (Game Rom Aggregator): simple game selection interface for the
 advmame (arcade) and fceu (NES) emulators (maybe others in the future).
 
