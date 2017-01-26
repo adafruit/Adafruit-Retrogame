@@ -45,7 +45,7 @@ irqPin = 17   # IRQ pin for MCP23017
 
 os.system("sudo modprobe uinput")
 
-ui      = UInput(name="retrogame", bustype=e.BUS_USB)
+ui      = UInput({e.EV_KEY: key}, name="retrogame", bustype=e.BUS_USB)
 bus     = SMBus(1)
 IODIRA  = 0x00
 IOCONA  = 0x0A
