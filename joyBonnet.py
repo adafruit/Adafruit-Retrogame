@@ -31,7 +31,7 @@ try:
 except ImportError:
     exit("This library requires the smbus module\nInstall with: sudo pip install smbus")
 
-DEBUG = True
+DEBUG = False
 BOUNCE_TIME = 0.01 # Debounce time in seconds
 
 BUTTON_A = 12
