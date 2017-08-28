@@ -181,7 +181,7 @@ static int boardType(void) {
 		while(fgets(buf, sizeof(buf), fp)) {
 			if((ptr = strstr(buf, "mem_size=")) &&
 			   (sscanf(&ptr[9], "%x", &n) == 1) &&
-			   (n == 0x3F000000)) {
+			   ((n == 0x3F000000) || (n == 0x40000000))) {
 				board = 2; // Appears to be a Pi 2
 				break;
 			} else if((ptr = strstr(buf, "boardrev=")) &&
