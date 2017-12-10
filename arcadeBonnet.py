@@ -1,17 +1,24 @@
 #!/usr/bin/python
 
-# Somewhat minimal Adafruit Arcade Bonnet handler.  Runs in background,
-# translates inputs from MCP23017 port expander to virtual USB keyboard
-# events.  Not -quite- as efficient or featuretastic as retrogame, but
-# still reasonably lightweight and may be easier and/or more reliable than
-# retrogame for some users.  Supports ONE port expander, no regular GPIO
-# (non-port-expander) or "Vulcan nerve pinch" features.
-# Prerequisites:
-# sudo apt-get install python-pip python-smbus python-dev
-# sudo pip install evdev
-# Be sure to enable I2C via raspi-config.  Also, udev rules will need to
-# be set up per retrogame directions.
-# Credit to Pimoroni for Picade HAT scripts as starting point.
+"""Adafruit Arcade Bonnet handler
+
+Somewhat minimal Adafruit Arcade Bonnet handler.  Runs in background,
+translates inputs from MCP23017 port expander to virtual USB keyboard
+events.  Not -quite- as efficient or featuretastic as retrogame, but
+still reasonably lightweight and may be easier and/or more reliable than
+retrogame for some users.  Supports ONE port expander, no regular GPIO
+(non-port-expander) or "Vulcan nerve pinch" features.
+
+Prerequisites:
+
+i   sudo apt-get install python-pip python-smbus python-dev
+    sudo pip install evdev
+
+Be sure to enable I2C via raspi-config.  Also, udev rules will need to
+be set up per retrogame directions.
+
+Credit to Pimoroni for Picade HAT scripts as starting point.
+"""
 
 import os
 import time
@@ -42,10 +49,12 @@ key = [
     e.KEY_K           # Analog up
 ]
 
-addr = 0x26  # I2C Address of MCP23017
+addr = 0x26  # I2C address of Arcade bonnet MCP23017
+# addr = 0x27  # Alternate I2C address of Arcade bonnet MCP23017
 irqPin = 17  # IRQ pin for MCP23017
 
-# MCP23017 register addresses, bank 0 (interleaved) mode
+# MCP23017 register addresses, when in bank 0 (interleaved) mode
+
 IODIRA = 0x00
 IOCONA = 0x0A
 INTCAPA = 0x10
@@ -55,19 +64,25 @@ GPIOB = 0x13
 
 
 def mcp_irq(pin):
-    """ Callback for MCP23017 interrupt request """
+    """Callback for MCP23017 interrupt request
 
+    This routine is called to handle interrupt requests from the MCP23017
+    device. Interrupts are generated when any of the GPIO ports change
+    state. The port status is read, and key events are generated for each
+    pin that changed state from the previous call. A simple de-dup is
+    implemented by ignoring cases where the port status has not changed
+    since the previous call
+
+    """
     global oldState
-    global irq_count
-
-    irq_count += 1
 
     x = bus.read_i2c_block_data(addr, GPIOA, 2)
-    newState = (x[3] << 8) | x[2]
-    # quick event dedup - check for no change
+    newState = (x[1] << 8) | x[0]
+    # quick event dedup - check for no change since last interrupt.
     if newState == oldState:
         return
-    # something changed - figure it out :
+    # something changed - figure out the differences and generate
+    # key events.
     for i in range(16):
         bit = 1 << i
         lvl = newState & bit
@@ -77,17 +92,28 @@ def mcp_irq(pin):
     oldState = newState
 
 
+# main program flow starts here
+
 os.system("sudo modprobe uinput")
 
 ui = UInput({e.EV_KEY: key}, name="retrogame", bustype=e.BUS_USB)
 bus = SMBus(1)
 
 # Configure the MCP23017 GPIO Extender
+#
+# We put the device into 'BANK=0' mode, which pairs the A/B device
+# registers in sequential addresses. The address of the IOCON register
+# changes depending on the bank mode. In bank=1 mode, the IOCON register
+# is at address 0x05, so we write to that address.  If the device was
+# already in bank=0 mode, the write to address 0x05 (GPINTENB) will be
+# harmless since we reconfigure the whole device.
 
 bus.write_byte_data(addr, 0x05, 0x00)  # If bank 1, switch to 0
 bus.write_byte_data(addr, IOCONA, 0x44)  # Bank 0, INTB=A, seq, OD IRQ
 
-# Read/modify/write remaining MCP23017 config:
+# Read/modify/write remaining MCP23017 config.
+# We enable the pins as inputs, enable pullups,
+# enable interrupts on change, and set polarity to normal.
 
 cfg = bus.read_i2c_block_data(addr, IODIRA, 14)
 cfg[0] = 0xFF  # Input bits
@@ -104,24 +130,23 @@ bus.write_i2c_block_data(addr, IODIRA, cfg)
 gpio.setwarnings(False)
 gpio.setmode(gpio.BCM)
 
-# XXX Notsure we need to enable interrupts here....
-# Clear interrupt by reading INTCAP and GPIO registers
-# x = bus.read_i2c_block_data(addr, GPIOA, 2)
-# oldState = (x[3] << 8) | x[2]
+oldState = 0  # used to detect changes since last event
 
 # Enable pullup and callback on MCP23017 IRQ pin
+# All initalization should be complete before this point,
+# since our handler can now be called at any time
 
-oldState = 0
 gpio.setup(irqPin, gpio.IN, pull_up_down=gpio.PUD_UP)
 gpio.add_event_detect(irqPin, gpio.FALLING, callback=mcp_irq)
 
-irq_count = 0
 while True:
-
-    # Mostly, we wait for interrupts, which are handled by
-    # mcp_irq() on  a separate thread. We read and ognore the GPIOA registers
-    # primarily to re-enable interrupts if one was missed for any reason.
+    # Run forever and wait for interrupts, which are handled by
+    # mcp_irq() on  a separate thread.
+    #
+    # We regularly read the GPIOA registers (and ignore the result), which
+    # re-enables interrupts if one was missed for any reason. This avoids
+    # 'hangs' where the irq handler never gets called because interrupts are
+    # disabled but interupts will never be enabled unless a read occurs.
 
     time.sleep(0.1)
     x = bus.read_i2c_block_data(addr, GPIOA, 2)
-    # print("Callback count", irq_count)
