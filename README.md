@@ -11,13 +11,13 @@ __Visit forums.adafruit.com (General Project Help) for retrogame-related questio
 
 When requesting help, please be thorough in your description. Which model of Raspberry Pi, what release of RetroPie (or other OS image), and (if the trouble is localized) which system emulator exactly? For hardware-related issues, photos are extremely helpful. Thanks!
 
-For emulation-related questions (e.g. individual games not working), please use a support forum relevant to the software in use, e.g. the RetroPie Forum at https://retropie.org.uk/forum/ if using that package. Adafruit does not develop these emulators or the EmulationStation front-end.
+__For emulation-related questions (e.g. individual games not working), please use a support forum relevant to the software in use, e.g. the RetroPie Forum at https://retropie.org.uk/forum/ if using that package.__ Adafruit does not develop these emulators or the EmulationStation front-end.
 
 ### NEW: Configuration file
 
 retrogame now loads its pin/key settings from a file; no code editing required. An example file 'retrogame.cfg' is included in the 'configs' directory, copy this file to the /boot directory so retrogame can find it (/boot makes it easier to edit with the card in a reader on another system). Alternately, an absolute pathname to a settings file can be passed on the command line. This file can be edited live, no need to restart retrogame after making changes.
 
-__THE ioStandard[] AND ioTFT[] TABLES NO LONGER EXIST IN THE SOURCE CODE. You should not need to edit any code to make retrogame work.__ Everything is handled through the configuration file now. Some guides may be out of date and still refer to the old way; these will be updated over time.
+__THE ioStandard[] AND ioTFT[] TABLES NO LONGER EXIST IN THE SOURCE CODE. You should not need to edit ANY source code to make retrogame work.__ Everything is handled through the configuration file now. Some guides may be out of date and still refer to the old way; these will be updated over time.
 
 ### RetroPie 2.0+ Compatibility
 
@@ -36,3 +36,11 @@ SUBSYSTEM=="input", ATTRS{name}=="retrogame", ENV{ID_INPUT_KEYBOARD}="1"
 ````
 
 Save the file by pressing Ctrl-O and enter, then press Ctrl-x to exit. Restart your Raspberry Pi and run retrogame again, now button presses should register in SDL2 applications like the EmulationStation frontend to RetroPie
+
+---
+
+### Roadmap
+
+Development of the C retrogame program at this point is in maintenance mode -- bugs will be looked at and corrected where possible, but don't expect significant new features (such as support for more I/O port expander types), nor will pull requests for such be merged. The code has grown untenably complex.
+
+retrogame is a product of its time; first-generation Raspberry Pi devices with sub-optimal emulation software were common and obtuse C code was used to minimize memory use and CPU load. There's little benefit to such an approach now. For the Arcade Bonnet and Joy Bonnet, you'll see there are now simpler, device-specific Python scripts being used...either one consumes just a fraction of a percent of a system's resources. Rather than wrestling the retrogame code into doing Yet Another Thing, consider using one of these Python scripts as a starting point, and focus on just that one task.
