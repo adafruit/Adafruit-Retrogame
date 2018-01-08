@@ -15,7 +15,7 @@ LEFTCTRL 23   # Left control key = fire/jump/primary/'A' button
 LEFTALT   7   # Left alt key     = thrust/seconady/'B' button
 UP       10
 DOWN     17
-LEFT     23
+LEFT     25
 RIGHT     9
 ESC      23 7 # Esc key = hold 'A'+'B' buttons (exit ROM)
 
