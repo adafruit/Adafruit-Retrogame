@@ -10,15 +10,15 @@
 
 # Here's a pin configuration for the original Cupdade project:
 
-LEFT   2    # Joystick (4 pins)
-RIGHT  3
-DOWN   4
-UP    17
-Z     27    # Fire/jump/primary
-X     22    # Bomb/secondary
-R     23    # Credit
-Q     18    # Start 1P
-ESC   23 18 # Credit + Start = exit emulator
+LEFT      2    # Joystick (4 pins)
+RIGHT     3
+DOWN      4
+UP       17
+LEFTCTRL 27    # Fire/jump/primary
+LEFTALT  22    # Bomb/secondary
+5        23    # Credit
+1        18    # Start 1P
+ESC      23 18 # Credit + Start = exit emulator
 
 # For configurations with few buttons (e.g. Cupcade), a key can be followed
 # by multiple pin numbers.  When those pins are all held for a few seconds,
