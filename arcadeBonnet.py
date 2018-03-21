@@ -24,10 +24,10 @@ key = [ # EDIT KEYCODES IN THIS TABLE TO YOUR PREFERENCES:
 	# Keyboard        Bonnet        EmulationStation
 	e.KEY_LEFTCTRL, # 1A            'A' button
 	e.KEY_LEFTALT,  # 1B            'B' button
-	e.KEY_Z,        # 1C            'X' button
-	e.KEY_X,        # 1D            'Y' button
-	e.KEY_SPACE,    # 1E            'Select' button
-	e.KEY_ENTER,    # 1F            'Start' button
+	e.KEY_A,        # 1C            'X' button
+	e.KEY_S,        # 1D            'Y' button
+	e.KEY_5,        # 1E            'Select' button
+	e.KEY_1,        # 1F            'Start' button
 	0,              # Bit 6 NOT CONNECTED on Bonnet
 	0,              # Bit 7 NOT CONNECTED on Bonnet
 	e.KEY_DOWN,     # 4-way down    D-pad down
