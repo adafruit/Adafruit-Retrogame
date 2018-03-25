@@ -8,7 +8,11 @@ retrogame: retrogame.c keyTable.h
 	$(CC) $< -o $@
 	strip $@
 
+ifeq ($(shell [ -r '/usr/include/linux/input-event-codes.h' ] && echo 'X'),X)
+KEYFILE = /usr/include/linux/input-event-codes.h
+else
 KEYFILE = /usr/include/linux/input.h
+endif
 keyTable.h: keyTableGen.sh $(KEYFILE)
 	sh $^ >$@
 
