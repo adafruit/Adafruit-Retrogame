@@ -86,12 +86,14 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <linux/input.h>
 #include <linux/uinput.h>
 #include <linux/i2c-dev.h>
+#include <bcm_host.h>
 #include "keyTable.h"
 
 // Global variables and such -----------------------------------------------
 
 bool
-   running      = true;              // Signal handler will set false (exit)
+   running      = true,              // Signal handler will set false (exit)
+   isEarlyPi    = false;             // true=Pi1Rev1, false=all other
 extern char
   *__progname,                       // Program name (for error reporting)
   *program_invocation_name;          // Full name as invoked (path, etc.)
@@ -100,7 +102,6 @@ char
   *cfgPath,                          // Directory containing config file
   *cfgName      = NULL,              // Name (no path) of config
   *cfgPathname,                      // Full path/name to config file
-   board,                            // 0=Pi1Rev1, 1=Pi1Rev2, 2=Pi2/Pi3
    debug        = 0,                 // 0=off, 1=cfg file, 2=live buttons
    startupDebug = 0,                 // Initial debug level before cfg load
    readAddr     = 0x10;              // For MCP23017 reads (INTCAPA reg addr)
@@ -146,18 +147,15 @@ dict command[] = { // Struct is defined in keyTable.h
 	// Might add commands here for fine-tuning debounce & repeat settings
 	{  NULL     , -1        } }; // END-OF-LIST
 
-#define PI1_BCM2708_PERI_BASE 0x20000000
-#define PI1_GPIO_BASE         (PI1_BCM2708_PERI_BASE + 0x200000)
-#define PI2_BCM2708_PERI_BASE 0x3F000000
-#define PI2_GPIO_BASE         (PI2_BCM2708_PERI_BASE + 0x200000)
-#define BLOCK_SIZE            (4*1024)
-#define GPPUD                 (0x94 / 4)
-#define GPPUDCLK0             (0x98 / 4)
+#define GPIO_BASE  0x200000
+#define BLOCK_SIZE (4*1024)
+#define GPPUD      (0x94 / 4)
+#define GPPUDCLK0  (0x98 / 4)
 
-#define IODIRA                0x00
-#define IOCONA                0x0A
+#define IODIRA     0x00
+#define IOCONA     0x0A
 
-#define GND                   KEY_CNT
+#define GND        KEY_CNT
 
 // Debug levels: 0 = off, 1 = config file errors, 2 = + config file status,
 // 3 = + report button states 'live'.
@@ -166,28 +164,23 @@ dict command[] = { // Struct is defined in keyTable.h
 // Some utility functions --------------------------------------------------
 
 // Detect Pi board type.  Not detailed, just enough for GPIO compatibilty:
-// 0 = Pi 1 Model B revision 1
-// 1 = Pi 1 Model B revision 2, Model A, Model B+, Model A+
-// 2 = Pi 2 Model B or Pi 3
-static int boardType(void) {
+// true  = Pi 1 Model B revision 1 (some GPIO pin numbers were different)
+// false = All other board types
+static bool earlyPiDetect(void) {
 	FILE *fp;
 	char  buf[1024], *ptr;
-	int   n, board = 1; // Assume Pi1 Rev2 by default
+	int   n;
+	bool  isEarly = false; // Assume "modern" Pi by default
 
 	// Relies on info in /proc/cmdline.  If this becomes unreliable
 	// in the future, alt code below uses /proc/cpuinfo if any better.
 #if 1
 	if((fp = fopen("/proc/cmdline", "r"))) {
 		while(fgets(buf, sizeof(buf), fp)) {
-			if((ptr = strstr(buf, "mem_size=")) &&
-			   (sscanf(&ptr[9], "%x", &n) == 1) &&
-			   ((n == 0x3F000000) || (n == 0x40000000))) {
-				board = 2; // Appears to be a Pi 2
-				break;
-			} else if((ptr = strstr(buf, "boardrev=")) &&
+			if((ptr = strstr(buf, "boardrev=")) &&
 			          (sscanf(&ptr[9], "%x", &n) == 1) &&
 			          ((n == 0x02) || (n == 0x03))) {
-				board = 0; // Appears to be an early Pi
+				isEarly = true; // Appears to be an early Pi
 				break;
 			}
 		}
@@ -197,15 +190,10 @@ static int boardType(void) {
 	char s[8];
 	if((fp = fopen("/proc/cpuinfo", "r"))) {
 		while(fgets(buf, sizeof(buf), fp)) {
-			if((ptr = strstr(buf, "Hardware")) &&
-			   (sscanf(&ptr[8], " : %7s", s) == 1) &&
-			   (!strcmp(s, "BCM2709"))) {
-				board = 2; // Appears to be a Pi 2
-				break;
-			} else if((ptr = strstr(buf, "Revision")) &&
+			if((ptr = strstr(buf, "Revision")) &&
 			          (sscanf(&ptr[8], " : %x", &n) == 1) &&
 			          ((n == 0x02) || (n == 0x03))) {
-				board = 0; // Appears to be an early Pi
+				isEarly = true; // Appears to be an early Pi
 				break;
 			}
 		}
@@ -213,7 +201,7 @@ static int boardType(void) {
 	}
 #endif
 
-	return board;
+	return isEarly;
 }
 
 // Set one GPIO pin attribute through the Sysfs interface.
@@ -372,7 +360,7 @@ static int dictSearch(char *str, dict *d) {
 // pin numbers for compatibility.  Can then use 'modern' pin numbers
 // regardless of board type.
 static int pinRemap(int i) {
-	if(board == 0) {
+	if(isEarlyPi) {
 		if     (i ==  2) return  0;
 		else if(i ==  3) return  1;
 		else if(i == 27) return 21;
@@ -1035,10 +1023,9 @@ int main(int argc, char *argv[]) {
 
 	// GPIO startup ----------------------------------------------------
 
-	board = boardType();
-	if(debug) {
-		printf("%s: Board is %s-core\n", __progname,
-		  (board == 2) ? "multi" : "single");
+	isEarlyPi = earlyPiDetect();
+	if(debug & isEarlyPi) {
+		printf("%s: running on Rev1 Pi 1 Board\n", __progname);
 	}
 
 	// Although Sysfs provides solid GPIO interrupt handling, there's
@@ -1055,9 +1042,7 @@ int main(int argc, char *argv[]) {
 	  PROT_READ|PROT_WRITE, // Enable read+write
 	  MAP_SHARED,           // Shared with other processes
 	  fd,                   // File to map
-	  (board == 2) ?
-	   PI2_GPIO_BASE :      // -> GPIO registers
-	   PI1_GPIO_BASE);
+          bcm_host_get_peripheral_address() + GPIO_BASE);
 	close(fd);              // Not needed after mmap()
 	if(gpio == MAP_FAILED) err("Can't mmap()");
 
