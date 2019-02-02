@@ -48,9 +48,17 @@ ANALOG_THRESH_NEG = -600
 ANALOG_THRESH_POS = 600
 analog_states = [False, False, False, False]  # up down left right
 
+#Set to True to use joystick to move the mouse pointer
+JOYSTICK_AS_MOUSE = False
+MOUSE_SENSITIVITY = 4 # 0-10
+MOUSE_DEADZONE = 40 # Values under this are zeroed
+
+
 KEYS= { # EDIT KEYCODES IN THIS TABLE TO YOUR PREFERENCES:
 	# See /usr/include/linux/input.h for keycode names
 	# Keyboard        Bonnet        EmulationStation
+#	BUTTON_A: e.BTN_MOUSE,    # 'A' button as mouse click
+#	BUTTON_B: e.BTN_RIGHT,    # 'B' button as right click
 	BUTTON_A: e.KEY_LEFTCTRL, # 'A' button
 	BUTTON_B: e.KEY_LEFTALT,  # 'B' button
 	BUTTON_X: e.KEY_Z,        # 'X' button
@@ -64,6 +72,8 @@ KEYS= { # EDIT KEYCODES IN THIS TABLE TO YOUR PREFERENCES:
 	1002:     e.KEY_LEFT,     # Analog left
 	1003:     e.KEY_RIGHT,    # Analog right
 }
+
+
 
 ###################################### ADS1015 microdriver #################################
 # Register and other configuration values:
@@ -130,7 +140,10 @@ gpio.setmode(gpio.BCM)
 gpio.setup(BUTTONS, gpio.IN, pull_up_down=gpio.PUD_UP)
 
 try:
-    ui = UInput({e.EV_KEY: KEYS.values()}, name="retrogame", bustype=e.BUS_USB)
+    caps= {e.EV_KEY: KEYS.values(),
+           e.EV_REL: [e.REL_X, e.REL_Y],
+          }
+    ui = UInput(caps, name="retrogame", bustype=e.BUS_USB)
 except uinput.UInputError as e:
     sys.stdout.write(e.message)
     sys.stdout.write("Have you tried running as root? sudo {}".format(sys.argv[0]))
@@ -150,6 +163,7 @@ def handle_button(pin):
       state = analog_states[pin-1000]
     else:
       state = 0 if gpio.input(pin) else 1
+
     ui.write(e.EV_KEY, key, state)
     ui.syn()
     if DEBUG:
@@ -165,31 +179,41 @@ while True:
     x = ads_read(1) - 800
   except IOError:
     continue
-  #print("(%d , %d)" % (x, y))
-
-  if (y > ANALOG_THRESH_POS) and not analog_states[0]:
-    analog_states[0] = True
-    handle_button(1000)      # send UP press
-  if (y < ANALOG_THRESH_POS) and analog_states[0]:
-    analog_states[0] = False
-    handle_button(1000)      # send UP release
-  if (y < ANALOG_THRESH_NEG) and not analog_states[1]:
-    analog_states[1] = True
-    handle_button(1001)      # send DOWN press
-  if (y > ANALOG_THRESH_NEG) and analog_states[1]:
-    analog_states[1] = False
-    handle_button(1001)      # send DOWN release
-  if (x < ANALOG_THRESH_NEG) and not analog_states[2]:
-    analog_states[2] = True
-    handle_button(1002)      # send LEFT press
-  if (x > ANALOG_THRESH_NEG) and analog_states[2]:
-    analog_states[2] = False
-    handle_button(1002)      # send LEFT release
-  if (x > ANALOG_THRESH_POS) and not analog_states[3]:
-    analog_states[3] = True
-    handle_button(1003)      # send RIGHT press
-  if (x < ANALOG_THRESH_POS) and analog_states[3]:
-    analog_states[3] = False
-    handle_button(1003)      # send RIGHT release
-
+#  print("(%d , %d)" % (x, y))
+  
+  if JOYSTICK_AS_MOUSE:
+      if abs(x) < MOUSE_DEADZONE:
+        x=0
+      if abs(y) < MOUSE_DEADZONE:
+        y=0
+      x = x >> (10 - MOUSE_SENSITIVITY)
+      y = y >> (10 - MOUSE_SENSITIVITY)
+      ui.write(e.EV_REL, e.REL_X, x)
+      ui.write(e.EV_REL, e.REL_Y, -y)
+      ui.syn()
+  else:
+      if (y > ANALOG_THRESH_POS) and not analog_states[0]:
+        analog_states[0] = True
+        handle_button(1000)      # send UP press
+      if (y < ANALOG_THRESH_POS) and analog_states[0]:
+        analog_states[0] = False
+        handle_button(1000)      # send UP release
+      if (y < ANALOG_THRESH_NEG) and not analog_states[1]:
+        analog_states[1] = True
+        handle_button(1001)      # send DOWN press
+      if (y > ANALOG_THRESH_NEG) and analog_states[1]:
+        analog_states[1] = False
+        handle_button(1001)      # send DOWN release
+      if (x < ANALOG_THRESH_NEG) and not analog_states[2]:
+        analog_states[2] = True
+        handle_button(1002)      # send LEFT press
+      if (x > ANALOG_THRESH_NEG) and analog_states[2]:
+        analog_states[2] = False
+        handle_button(1002)      # send LEFT release
+      if (x > ANALOG_THRESH_POS) and not analog_states[3]:
+        analog_states[3] = True
+        handle_button(1003)      # send RIGHT press
+      if (x < ANALOG_THRESH_POS) and analog_states[3]:
+        analog_states[3] = False
+        handle_button(1003)      # send RIGHT release
   time.sleep(0.01)
