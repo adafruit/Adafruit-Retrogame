@@ -44,26 +44,24 @@ PLAYER1  = 23
 PLAYER2  = 22
 BUTTONS = [BUTTON_A, BUTTON_B, BUTTON_X, BUTTON_Y, SELECT, START, PLAYER1, PLAYER2]
 
-ANALOG_THRESH_NEG = -600
-ANALOG_THRESH_POS = 600
-analog_states = [False, False, False, False]  # up down left right
+MOUSE_SENSITIVITY = 4 # 0-10
+MOUSE_DEADZONE = 40 # Values under this are zeroed
+
 
 KEYS= { # EDIT KEYCODES IN THIS TABLE TO YOUR PREFERENCES:
 	# See /usr/include/linux/input.h for keycode names
 	# Keyboard        Bonnet        EmulationStation
-	BUTTON_A: e.KEY_LEFTCTRL, # 'A' button
-	BUTTON_B: e.KEY_LEFTALT,  # 'B' button
-	BUTTON_X: e.KEY_Z,        # 'X' button
-	BUTTON_Y: e.KEY_X,        # 'Y' button
-	SELECT:   e.KEY_SPACE,    # 'Select' button
-	START:    e.KEY_ENTER,    # 'Start' button
-	PLAYER1:  e.KEY_1,        # '#1' button         
-	PLAYER2:  e.KEY_2,        # '#2' button
-	1000:     e.KEY_UP,       # Analog up
-	1001:     e.KEY_DOWN,     # Analog down
-	1002:     e.KEY_LEFT,     # Analog left
-	1003:     e.KEY_RIGHT,    # Analog right
+	BUTTON_A: e.KEY_RIGHT,    # 'A' button as mouse click
+	BUTTON_B: e.KEY_DOWN,     # 'B' button as right click
+    BUTTON_X: e.KEY_UP,     # 'X' button
+	BUTTON_Y: e.KEY_LEFT,       # 'Y' button
+	SELECT:   e.BTN_RIGHT,    # 'Select' button
+	START:    e.BTN_MOUSE,    # 'Start' button
+	PLAYER1:  e.KEY_PAGEUP,   # '#1' button
+	PLAYER2:  e.KEY_PAGEDOWN, # '#2' button
 }
+
+
 
 ###################################### ADS1015 microdriver #################################
 # Register and other configuration values:
@@ -90,21 +88,21 @@ ADS1015_REG_CONFIG_CHANNELS = (ADS1015_REG_CONFIG_MUX_SINGLE_0, ADS1015_REG_CONF
 			       ADS1015_REG_CONFIG_MUX_SINGLE_2, ADS1015_REG_CONFIG_MUX_SINGLE_3)
 
 def ads_read(channel):
-  #configdata = bus.read_i2c_block_data(ADS1x15_DEFAULT_ADDRESS, ADS1x15_POINTER_CONFIG, 2) 
+  #configdata = bus.read_i2c_block_data(ADS1x15_DEFAULT_ADDRESS, ADS1x15_POINTER_CONFIG, 2)
   #print("Getting config byte = 0x%02X%02X" % (configdata[0], configdata[1]))
 
-  configword = ADS1015_REG_CONFIG_CQUE_NONE | ADS1015_REG_CONFIG_CLAT_NONLAT | ADS1015_REG_CONFIG_CPOL_ACTVLOW | ADS1015_REG_CONFIG_CMODE_TRAD   |  ADS1015_REG_CONFIG_DR_1600SPS | ADS1015_REG_CONFIG_MODE_SINGLE  | ADS1015_REG_CONFIG_GAIN_ONE | ADS1015_REG_CONFIG_CHANNELS[channel] | ADS1015_REG_CONFIG_OS_SINGLE 
+  configword = ADS1015_REG_CONFIG_CQUE_NONE | ADS1015_REG_CONFIG_CLAT_NONLAT | ADS1015_REG_CONFIG_CPOL_ACTVLOW | ADS1015_REG_CONFIG_CMODE_TRAD   |  ADS1015_REG_CONFIG_DR_1600SPS | ADS1015_REG_CONFIG_MODE_SINGLE  | ADS1015_REG_CONFIG_GAIN_ONE | ADS1015_REG_CONFIG_CHANNELS[channel] | ADS1015_REG_CONFIG_OS_SINGLE
   configdata = [configword >> 8, configword & 0xFF]
 
   #print("Setting config byte = 0x%02X%02X" % (configdata[0], configdata[1]))
   bus.write_i2c_block_data(ADS1x15_DEFAULT_ADDRESS, ADS1x15_POINTER_CONFIG, configdata)
 
-  configdata = bus.read_i2c_block_data(ADS1x15_DEFAULT_ADDRESS, ADS1x15_POINTER_CONFIG, 2) 
+  configdata = bus.read_i2c_block_data(ADS1x15_DEFAULT_ADDRESS, ADS1x15_POINTER_CONFIG, 2)
   #print("Getting config byte = 0x%02X%02X" % (configdata[0], configdata[1]))
 
   while True:
      try:
-       configdata = bus.read_i2c_block_data(ADS1x15_DEFAULT_ADDRESS, ADS1x15_POINTER_CONFIG, 2) 
+       configdata = bus.read_i2c_block_data(ADS1x15_DEFAULT_ADDRESS, ADS1x15_POINTER_CONFIG, 2)
        #print("Getting config byte = 0x%02X%02X" % (configdata[0], configdata[1]))
        if (configdata[0] & 0x80):
          break
@@ -130,7 +128,10 @@ gpio.setmode(gpio.BCM)
 gpio.setup(BUTTONS, gpio.IN, pull_up_down=gpio.PUD_UP)
 
 try:
-    ui = UInput({e.EV_KEY: KEYS.values()}, name="retrogame", bustype=e.BUS_USB)
+    caps= {e.EV_KEY: KEYS.values(),
+           e.EV_REL: [e.REL_X, e.REL_Y],
+          }
+    ui = UInput(caps, name="retrogame", bustype=e.BUS_USB)
 except uinput.UInputError as e:
     sys.stdout.write(e.message)
     sys.stdout.write("Have you tried running as root? sudo {}".format(sys.argv[0]))
@@ -146,10 +147,7 @@ def log(msg):
 def handle_button(pin):
     key = KEYS[pin]
     time.sleep(BOUNCE_TIME)
-    if pin >= 1000:
-      state = analog_states[pin-1000]
-    else:
-      state = 0 if gpio.input(pin) else 1
+    state = 0 if gpio.input(pin) else 1
     ui.write(e.EV_KEY, key, state)
     ui.syn()
     if DEBUG:
@@ -165,31 +163,16 @@ while True:
     x = ads_read(1) - 800
   except IOError:
     continue
-  #print("(%d , %d)" % (x, y))
+#  print("(%d , %d)" % (x, y))
 
-  if (y > ANALOG_THRESH_POS) and not analog_states[0]:
-    analog_states[0] = True
-    handle_button(1000)      # send UP press
-  if (y < ANALOG_THRESH_POS) and analog_states[0]:
-    analog_states[0] = False
-    handle_button(1000)      # send UP release
-  if (y < ANALOG_THRESH_NEG) and not analog_states[1]:
-    analog_states[1] = True
-    handle_button(1001)      # send DOWN press
-  if (y > ANALOG_THRESH_NEG) and analog_states[1]:
-    analog_states[1] = False
-    handle_button(1001)      # send DOWN release
-  if (x < ANALOG_THRESH_NEG) and not analog_states[2]:
-    analog_states[2] = True
-    handle_button(1002)      # send LEFT press
-  if (x > ANALOG_THRESH_NEG) and analog_states[2]:
-    analog_states[2] = False
-    handle_button(1002)      # send LEFT release
-  if (x > ANALOG_THRESH_POS) and not analog_states[3]:
-    analog_states[3] = True
-    handle_button(1003)      # send RIGHT press
-  if (x < ANALOG_THRESH_POS) and analog_states[3]:
-    analog_states[3] = False
-    handle_button(1003)      # send RIGHT release
 
+  if abs(x) < MOUSE_DEADZONE:
+    x=0
+  if abs(y) < MOUSE_DEADZONE:
+    y=0
+  x = x >> (10 - MOUSE_SENSITIVITY)
+  y = y >> (10 - MOUSE_SENSITIVITY)
+  ui.write(e.EV_REL, e.REL_X, x)
+  ui.write(e.EV_REL, e.REL_Y, -y)
+  ui.syn()
   time.sleep(0.01)
