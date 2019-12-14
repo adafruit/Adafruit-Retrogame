@@ -147,15 +147,19 @@ dict command[] = { // Struct is defined in keyTable.h
 	// Might add commands here for fine-tuning debounce & repeat settings
 	{  NULL     , -1        } }; // END-OF-LIST
 
-#define GPIO_BASE  0x200000
-#define BLOCK_SIZE (4*1024)
-#define GPPUD      (0x94 / 4)
-#define GPPUDCLK0  (0x98 / 4)
+#define GPIO_BASE              0x200000
+#define BLOCK_SIZE             (4*1024)
+#define GPPUD                  (0x94 / 4)
+#define GPPUDCLK0              (0x98 / 4)
+#define PULLUPDN_OFFSET_2711_0 57
+#define PULLUPDN_OFFSET_2711_1 58
+#define PULLUPDN_OFFSET_2711_2 59
+#define PULLUPDN_OFFSET_2711_3 60
 
-#define IODIRA     0x00
-#define IOCONA     0x0A
+#define IODIRA                 0x00
+#define IOCONA                 0x0A
 
-#define GND        KEY_CNT
+#define GND                    KEY_CNT
 
 // Debug levels: 0 = off, 1 = config file errors, 2 = + config file status,
 // 3 = + report button states 'live'.
@@ -217,13 +221,29 @@ static int pinSetup(int pin, char *attr, char *value) {
 
 // Configure GPIO internal pull up/down/none
 static void pull(int bitmask, int state) {
-	volatile unsigned char shortWait;
-	gpio[GPPUD]     = state;         // 2=up, 1=down, 0=none
-	for(shortWait=150;--shortWait;); // Min 150 cycle wait
-	gpio[GPPUDCLK0] = bitmask;       // Set pullup mask
-	for(shortWait=150;--shortWait;); // Wait again
-	gpio[GPPUD]     = 0;             // Reset pullup registers
-	gpio[GPPUDCLK0] = 0;
+	if(gpio[PULLUPDN_OFFSET_2711_3] != 0x6770696f) {
+		// Pi 4 insights from RPi.GPIO:
+		unsigned int pull = state ? (3 - state) : state;
+		for(int bit=0; bit<32; bit++) {
+			if(!(bitmask & (1UL << bit))) continue;
+			int pullreg = PULLUPDN_OFFSET_2711_0 + (bit >> 4);
+			int pullshift = (bit & 0xF) << 1;
+			unsigned int pullbits;
+			pullbits      = gpio[pullreg];
+			pullbits     &= ~(3 << pullshift);
+			pullbits     |= (pull << pullshift);
+			gpio[pullreg] = pullbits;
+		}
+	} else {
+		// Legacy pull up/down method:
+		volatile unsigned char shortWait;
+		gpio[GPPUD]     = state;         // 2=up, 1=down, 0=none
+		for(shortWait=150;--shortWait;); // Min 150 cycle wait
+		gpio[GPPUDCLK0] = bitmask;       // Set pullup mask
+		for(shortWait=150;--shortWait;); // Wait again
+		gpio[GPPUD]     = 0;             // Reset pullup registers
+		gpio[GPPUDCLK0] = 0;
+	}
 }
 
 // Restore GPIO and uinput to startup state; un-export any Sysfs pins used,
@@ -312,7 +332,7 @@ static void pinConfigUnload() {
 	memset(vulcanMask, 0, sizeof(vulcanMask));
 	memset(mcpI2C    , 0, sizeof(mcpI2C));
 	memset(i2cfd     , 0, sizeof(i2cfd));
-        mcpMask = 0;
+	mcpMask = 0;
 }
 
 // Quick-n-dirty error reporter; print message, clean up and exit.
@@ -341,7 +361,7 @@ static int filter1(const struct dirent *d) {
 		}
 		if(!strncmp(line, __progname, strlen(__progname))) return 1;
 	}
-        return 0;
+	return 0;
 }
 
 // A second scandir() filter, checks for filename of 'event' + #
@@ -1042,7 +1062,7 @@ int main(int argc, char *argv[]) {
 	  PROT_READ|PROT_WRITE, // Enable read+write
 	  MAP_SHARED,           // Shared with other processes
 	  fd,                   // File to map
-          bcm_host_get_peripheral_address() + GPIO_BASE);
+	  bcm_host_get_peripheral_address() + GPIO_BASE);
 	close(fd);              // Not needed after mmap()
 	if(gpio == MAP_FAILED) err("Can't mmap()");
 
