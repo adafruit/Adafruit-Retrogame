@@ -46,7 +46,12 @@ BUTTONS = [BUTTON_A, BUTTON_B, BUTTON_X, BUTTON_Y, SELECT, START, PLAYER1, PLAYE
 
 ANALOG_THRESH_NEG = -600
 ANALOG_THRESH_POS = 600
-analog_states = [False, False, False, False]  # up down left right
+analog_states = [False, False, False, False, False, False, False, False]  # up down left right up-left up-right down-right down-left
+ENABLE_DIAGONAL_DIRECTIONS = False
+
+if ENABLE_DIAGONAL_DIRECTIONS:
+  ANALOG_THRESH_NEG = -300
+  ANALOG_THRESH_POS = 300
 
 KEYS= { # EDIT KEYCODES IN THIS TABLE TO YOUR PREFERENCES:
 	# See /usr/include/linux/input.h for keycode names
@@ -63,6 +68,10 @@ KEYS= { # EDIT KEYCODES IN THIS TABLE TO YOUR PREFERENCES:
 	1001:     e.KEY_DOWN,     # Analog down
 	1002:     e.KEY_LEFT,     # Analog left
 	1003:     e.KEY_RIGHT,    # Analog right
+  1004:     e.KP7,          # Analog up-left
+  1005:     e.KP9,          # Analog up-right
+  1006:     e.KP3,          # Analog down-right
+  1007:     e.KP1,          # Analog down-left
 }
 
 ###################################### ADS1015 microdriver #################################
@@ -167,29 +176,84 @@ while True:
     continue
   #print("(%d , %d)" % (x, y))
 
-  if (y > ANALOG_THRESH_POS) and not analog_states[0]:
-    analog_states[0] = True
-    handle_button(1000)      # send UP press
-  if (y < ANALOG_THRESH_POS) and analog_states[0]:
-    analog_states[0] = False
-    handle_button(1000)      # send UP release
-  if (y < ANALOG_THRESH_NEG) and not analog_states[1]:
-    analog_states[1] = True
-    handle_button(1001)      # send DOWN press
-  if (y > ANALOG_THRESH_NEG) and analog_states[1]:
-    analog_states[1] = False
-    handle_button(1001)      # send DOWN release
-  if (x < ANALOG_THRESH_NEG) and not analog_states[2]:
-    analog_states[2] = True
-    handle_button(1002)      # send LEFT press
-  if (x > ANALOG_THRESH_NEG) and analog_states[2]:
-    analog_states[2] = False
-    handle_button(1002)      # send LEFT release
-  if (x > ANALOG_THRESH_POS) and not analog_states[3]:
-    analog_states[3] = True
-    handle_button(1003)      # send RIGHT press
-  if (x < ANALOG_THRESH_POS) and analog_states[3]:
-    analog_states[3] = False
-    handle_button(1003)      # send RIGHT release
+  if ENABLE_DIAGONAL_DIRECTIONS: # Cardinal and Diagonal directions
+
+    # Cardinal directions
+    if (y > ANALOG_THRESH_POS) and (not analog_states[0]) and not (x > ANALOG_THRESH_POS or x < ANALOG_THRESH_NEG):
+      analog_states[0] = True
+      handle_button(1000)      # send UP press
+    if (y < ANALOG_THRESH_POS) and analog_states[0]:
+      analog_states[0] = False
+      handle_button(1000)      # send UP release
+    if (y < ANALOG_THRESH_NEG) and (not analog_states[1]) and not (x > ANALOG_THRESH_POS or x < ANALOG_THRESH_NEG):
+      analog_states[1] = True
+      handle_button(1001)      # send DOWN press
+    if (y > ANALOG_THRESH_NEG) and analog_states[1]:
+      analog_states[1] = False
+      handle_button(1001)      # send DOWN release
+    if (x < ANALOG_THRESH_NEG) and (not analog_states[2]) and not (y > ANALOG_THRESH_POS or y < ANALOG_THRESH_NEG):
+      analog_states[2] = True
+      handle_button(1002)      # send LEFT press
+    if (x > ANALOG_THRESH_NEG) and analog_states[2]:
+      analog_states[2] = False
+      handle_button(1002)      # send LEFT release
+    if (x > ANALOG_THRESH_POS) and (not analog_states[3]) and not (y > ANALOG_THRESH_POS or y < ANALOG_THRESH_NEG):
+      analog_states[3] = True
+      handle_button(1003)      # send RIGHT press
+    if (x < ANALOG_THRESH_POS) and analog_states[3]:
+      analog_states[3] = False
+      handle_button(1003)      # send RIGHT release
+    
+    # Diagonal directions
+    if (y > ANALOG_THRESH_POS and x < ANALOG_THRESH_NEG) and not analog_states[4]:
+      analog_states[4] = True
+      handle_button(1004)      # send UP-LEFT press
+    if (y < ANALOG_THRESH_POS or x > ANALOG_THRESH_NEG) and analog_states[4]:
+      analog_states[4] = False
+      handle_button(1004)      # send UP-LEFT release
+    if (y > ANALOG_THRESH_POS and x > ANALOG_THRESH_POS) and not analog_states[5]:
+      analog_states[5] = True
+      handle_button(1005)      # send UP-RIGHT press
+    if (y < ANALOG_THRESH_POS or x < ANALOG_THRESH_POS) and analog_states[5]:
+      analog_states[5] = False
+      handle_button(1005)      # send UP-RIGHT release
+    if (x > ANALOG_THRESH_POS and y < ANALOG_THRESH_NEG) and not analog_states[6]:
+      analog_states[6] = True
+      handle_button(1006)      # send DOWN-RIGHT press
+    if (x < ANALOG_THRESH_POS or y > ANALOG_THRESH_NEG) and analog_states[6]:
+      analog_states[6] = False
+      handle_button(1006)      # send DOWN-RIGHT release
+    if (x < ANALOG_THRESH_NEG and y < ANALOG_THRESH_NEG) and not analog_states[7]:
+      analog_states[7] = True
+      handle_button(1007)      # send DOWN-LEFT press
+    if (x > ANALOG_THRESH_NEG or y > ANALOG_THRESH_NEG) and analog_states[7]:
+      analog_states[7] = False
+      handle_button(1007)      # send DOWN-LEFT release
+
+  else: # Only Cardinal directions
+    if (y > ANALOG_THRESH_POS) and not analog_states[0]:
+      analog_states[0] = True
+      handle_button(1000)      # send UP press
+    if (y < ANALOG_THRESH_POS) and analog_states[0]:
+      analog_states[0] = False
+      handle_button(1000)      # send UP release
+    if (y < ANALOG_THRESH_NEG) and not analog_states[1]:
+      analog_states[1] = True
+      handle_button(1001)      # send DOWN press
+    if (y > ANALOG_THRESH_NEG) and analog_states[1]:
+      analog_states[1] = False
+      handle_button(1001)      # send DOWN release
+    if (x < ANALOG_THRESH_NEG) and not analog_states[2]:
+      analog_states[2] = True
+      handle_button(1002)      # send LEFT press
+    if (x > ANALOG_THRESH_NEG) and analog_states[2]:
+      analog_states[2] = False
+      handle_button(1002)      # send LEFT release
+    if (x > ANALOG_THRESH_POS) and not analog_states[3]:
+      analog_states[3] = True
+      handle_button(1003)      # send RIGHT press
+    if (x < ANALOG_THRESH_POS) and analog_states[3]:
+      analog_states[3] = False
+      handle_button(1003)      # send RIGHT release
 
   time.sleep(0.01)
