@@ -54,24 +54,24 @@ if ENABLE_DIAGONAL_DIRECTIONS:
   ANALOG_THRESH_POS = 300
 
 KEYS= { # EDIT KEYCODES IN THIS TABLE TO YOUR PREFERENCES:
-  # See /usr/include/linux/input.h for keycode names
-  # Keyboard        Bonnet        EmulationStation
-  BUTTON_A: e.KEY_LEFTCTRL, # 'A' button
-  BUTTON_B: e.KEY_LEFTALT,  # 'B' button
-  BUTTON_X: e.KEY_Z,        # 'X' button
-  BUTTON_Y: e.KEY_X,        # 'Y' button
-  SELECT:   e.KEY_SPACE,    # 'Select' button
-  START:    e.KEY_ENTER,    # 'Start' button
-  PLAYER1:  e.KEY_1,        # '#1' button         
-  PLAYER2:  e.KEY_2,        # '#2' button
-  1000:     e.KEY_UP,       # Analog up
-  1001:     e.KEY_DOWN,     # Analog down
-  1002:     e.KEY_LEFT,     # Analog left
-  1003:     e.KEY_RIGHT,    # Analog right
-  1004:     e.KP7,          # Analog up-left
-  1005:     e.KP9,          # Analog up-right
-  1006:     e.KP3,          # Analog down-right
-  1007:     e.KP1,          # Analog down-left
+	# See /usr/include/linux/input.h for keycode names
+	# Keyboard        Bonnet        EmulationStation
+	BUTTON_A: e.KEY_LEFTCTRL, # 'A' button
+	BUTTON_B: e.KEY_LEFTALT,  # 'B' button
+	BUTTON_X: e.KEY_Z,        # 'X' button
+	BUTTON_Y: e.KEY_X,        # 'Y' button
+	SELECT:   e.KEY_SPACE,    # 'Select' button
+	START:    e.KEY_ENTER,    # 'Start' button
+	PLAYER1:  e.KEY_1,        # '#1' button         
+	PLAYER2:  e.KEY_2,        # '#2' button
+	1000:     e.KEY_UP,       # Analog up
+	1001:     e.KEY_DOWN,     # Analog down
+	1002:     e.KEY_LEFT,     # Analog left
+	1003:     e.KEY_RIGHT,    # Analog right
+	1004:     e.KP7,          # Analog up-left
+	1005:     e.KP9,          # Analog up-right
+	1006:     e.KP3,          # Analog down-right
+	1007:     e.KP1,          # Analog down-left
 }
 
 ###################################### ADS1015 microdriver #################################
