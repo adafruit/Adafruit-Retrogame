@@ -1,0 +1,40 @@
+Documentaion on How to install Retrogame into Retropie with GPIO buttons.
+
+Boot up Retrogame, preferrably with SSH enabled, so you access your pi remotely. This can be done with ethernet or wifi, depending on your situation.
+
+First if your 'Adafruit-Retrogame' file has the 'gamera.c' file you need to type:
+sudo apt-get install ncurses-dev libexpat1-dev - obviously you will need an internet connection.
+
+if you don't have 'gamera.c' just skip that step.
+
+first unzip files on a PC/Mac/Linux machine (trust me it's easier), pull the whole 'Adafruit-Retrogame' over to you Pi. in the /pi/home/ folder.
+
+Then edit the retrogame.c file to correspond to your button/gpio layout.
+
+Ctl-X, Y, enter. This exits and saves it. You can also edit the file on your computer. Then move the new file over to replace the old one.
+
+then, type: sudo make.
+
+wait for the build to finish.
+
+next type: sudo modprobe uinput. this gets the uinput kernel.
+
+to make this persistent (run at boot), (with quotations) type: sudo sh -c 'echo uinput >> /etc/modules'
+
+to test, type: sudo ./retrogame
+
+make sure all of your buttons work, plus each direction on joystick.
+
+Then ctl-c to quit the test.
+
+type: sudo nano /etc/rc.local
+
+Before the final “exit 0” line, insert this line: /home/pi/Adafruit-Retrogame/retrogame &
+
+Next type: sudo nano /etc/udev/rules.d/10-retrogame.rules
+
+Add this line: SUBSYSTEM=="input", ATTRS{name}=="retrogame", ENV{ID_INPUT_KEYBOARD}="1"
+
+if the line is already there don't worry about it.
+
+type: sudo reboot
