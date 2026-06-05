@@ -79,14 +79,13 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <poll.h>
 #include <signal.h>
 #include <dirent.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/signalfd.h>
 #include <sys/inotify.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
 #include <linux/i2c-dev.h>
-#include <bcm_host.h>
+#include <gpiod.h>
 #include "keyTable.h"
 
 // Global variables and such -----------------------------------------------
@@ -98,7 +97,6 @@ extern char
   *__progname,                       // Program name (for error reporting)
   *program_invocation_name;          // Full name as invoked (path, etc.)
 char
-   sysfs_root[] = "/sys/class/gpio", // Location of Sysfs GPIO files
   *cfgPath,                          // Directory containing config file
   *cfgName      = NULL,              // Name (no path) of config
   *cfgPathname,                      // Full path/name to config file
@@ -125,8 +123,12 @@ uint32_t
    mcpMask      = 0;                 // Bitmask of GPIOs assigned to MCP IRQs
 uint8_t
    mcpI2C[32];                       // GPIO index to MCP23017 I2C addr
-volatile unsigned int
-  *gpio         = NULL;              // GPIO register table
+// libgpiod handles. One chip, per-pin line requests on the GPIO header.
+// Index of line_req[] = BCM pin number on the GPIO header (0-31).
+struct gpiod_chip
+  *gpio_chip       = NULL;
+struct gpiod_line_request
+  *line_req[32]    = { NULL };
 struct pollfd
    p[35];                            // File descriptors for poll()
 
@@ -146,15 +148,6 @@ dict command[] = { // Struct is defined in keyTable.h
 	{ "DEBUG"   , CMD_DEBUG },
 	// Might add commands here for fine-tuning debounce & repeat settings
 	{  NULL     , -1        } }; // END-OF-LIST
-
-#define GPIO_BASE              0x200000
-#define BLOCK_SIZE             (4*1024)
-#define GPPUD                  (0x94 / 4)
-#define GPPUDCLK0              (0x98 / 4)
-#define PULLUPDN_OFFSET_2711_0 57
-#define PULLUPDN_OFFSET_2711_1 58
-#define PULLUPDN_OFFSET_2711_2 59
-#define PULLUPDN_OFFSET_2711_3 60
 
 #define IODIRA                 0x00
 #define IOCONA                 0x0A
@@ -208,42 +201,107 @@ static bool earlyPiDetect(void) {
 	return isEarly;
 }
 
-// Set one GPIO pin attribute through the Sysfs interface.
-static int pinSetup(int pin, char *attr, char *value) {
-	char filename[50];
-	int  fd, w, len = strlen(value);
-	sprintf(filename, "%s/gpio%d/%s", sysfs_root, pin, attr);
-	if((fd = open(filename, O_WRONLY)) < 0) return -1;
-	w = write(fd, value, len);
-	close(fd);
-	return (w != len); // 0 = success
+// Find the BCM GPIO chip ("pinctrl-bcm2835"/"pinctrl-bcm2711"/"pinctrl-rp1")
+// and open it. Walks /dev/gpiochip* asking each chip for its label until one
+// of the known names matches, so the same code works across Pi 1-5.
+static struct gpiod_chip *open_gpio_chip(void) {
+	const char *known[] = {
+		"pinctrl-rp1",     // Pi 5
+		"pinctrl-bcm2711", // Pi 4 / CM4
+		"pinctrl-bcm2835", // Pi 0-3
+		NULL
+	};
+	for(int n=0; n<8; n++) {
+		char path[32];
+		snprintf(path, sizeof(path), "/dev/gpiochip%d", n);
+		struct gpiod_chip *c = gpiod_chip_open(path);
+		if(!c) continue;
+		struct gpiod_chip_info *info = gpiod_chip_get_info(c);
+		if(info) {
+			const char *label = gpiod_chip_info_get_label(info);
+			for(int k=0; known[k]; k++) {
+				if(label && !strcmp(label, known[k])) {
+					gpiod_chip_info_free(info);
+					return c;
+				}
+			}
+			gpiod_chip_info_free(info);
+		}
+		gpiod_chip_close(c);
+	}
+	return NULL;
 }
 
-// Configure GPIO internal pull up/down/none
-static void pull(int bitmask, int state) {
-	if(gpio[PULLUPDN_OFFSET_2711_3] != 0x6770696f) {
-		// Pi 4 insights from RPi.GPIO:
-		unsigned int pull = state ? (3 - state) : state;
-		for(int bit=0; bit<32; bit++) {
-			if(!(bitmask & (1UL << bit))) continue;
-			int pullreg = PULLUPDN_OFFSET_2711_0 + (bit >> 4);
-			int pullshift = (bit & 0xF) << 1;
-			unsigned int pullbits;
-			pullbits      = gpio[pullreg];
-			pullbits     &= ~(3 << pullshift);
-			pullbits     |= (pull << pullshift);
-			gpio[pullreg] = pullbits;
-		}
+// Request one BCM GPIO line on the main GPIO chip.
+//   pin       BCM pin number (= line offset on pinctrl-bcm2xxx/rp1)
+//   direction GPIOD_LINE_DIRECTION_INPUT or _OUTPUT
+//   edge      GPIOD_LINE_EDGE_* (only relevant for inputs)
+//   bias      GPIOD_LINE_BIAS_* (only relevant for inputs)
+//   value     GPIOD_LINE_VALUE_* (initial value for outputs)
+// Returns 0 on success, -1 on failure. Stashes the request in line_req[pin]
+// and the pollable fd in p[pin].fd.
+static int request_line(int pin, int direction, int edge, int bias,
+                        int value) {
+	struct gpiod_line_settings *settings = gpiod_line_settings_new();
+	struct gpiod_line_config   *lcfg     = gpiod_line_config_new();
+	struct gpiod_request_config *rcfg    = gpiod_request_config_new();
+	int rc = -1;
+	if(!settings || !lcfg || !rcfg) goto cleanup;
+	gpiod_line_settings_set_direction(settings, direction);
+	if(direction == GPIOD_LINE_DIRECTION_INPUT) {
+		gpiod_line_settings_set_edge_detection(settings, edge);
+		gpiod_line_settings_set_bias(settings, bias);
 	} else {
-		// Legacy pull up/down method:
-		volatile unsigned char shortWait;
-		gpio[GPPUD]     = state;         // 2=up, 1=down, 0=none
-		for(shortWait=150;--shortWait;); // Min 150 cycle wait
-		gpio[GPPUDCLK0] = bitmask;       // Set pullup mask
-		for(shortWait=150;--shortWait;); // Wait again
-		gpio[GPPUD]     = 0;             // Reset pullup registers
-		gpio[GPPUDCLK0] = 0;
+		gpiod_line_settings_set_output_value(settings, value);
 	}
+	unsigned int offset = pin;
+	if(gpiod_line_config_add_line_settings(lcfg, &offset, 1, settings) < 0)
+		goto cleanup;
+	gpiod_request_config_set_consumer(rcfg, "retrogame");
+	struct gpiod_line_request *req =
+	  gpiod_chip_request_lines(gpio_chip, rcfg, lcfg);
+	if(!req) goto cleanup;
+	// Release any prior request on this pin (reconfiguration path).
+	if(line_req[pin]) gpiod_line_request_release(line_req[pin]);
+	line_req[pin] = req;
+	p[pin].fd = gpiod_line_request_get_fd(req);
+	rc = 0;
+cleanup:
+	if(rcfg)     gpiod_request_config_free(rcfg);
+	if(lcfg)     gpiod_line_config_free(lcfg);
+	if(settings) gpiod_line_settings_free(settings);
+	return rc;
+}
+
+// Release a previously-requested line, if any.
+static void release_line(int pin) {
+	if(line_req[pin]) {
+		gpiod_line_request_release(line_req[pin]);
+		line_req[pin] = NULL;
+		p[pin].fd = -1;
+	}
+}
+
+// Read the current value of a previously-requested input line.
+// Returns 1 (high), 0 (low), or -1 on error.
+static int read_line(int pin) {
+	if(!line_req[pin]) return -1;
+	enum gpiod_line_value v =
+	  gpiod_line_request_get_value(line_req[pin], pin);
+	return (v == GPIOD_LINE_VALUE_ACTIVE) ? 1
+	     : (v == GPIOD_LINE_VALUE_INACTIVE) ? 0 : -1;
+}
+
+// Drain pending edge events on a previously-requested input line.
+// libgpiod requires reading edge events to clear the fd's POLLIN, otherwise
+// poll() returns immediately every iteration. Equivalent to the
+// lseek+read("/sys/class/gpio/gpioN/value") drain the sysfs port did.
+static void drain_line_events(int pin) {
+	if(!line_req[pin]) return;
+	struct gpiod_edge_event_buffer *buf = gpiod_edge_event_buffer_new(16);
+	if(!buf) return;
+	(void)gpiod_line_request_read_edge_events(line_req[pin], buf, 16);
+	gpiod_edge_event_buffer_free(buf);
 }
 
 // Restore GPIO and uinput to startup state; un-export any Sysfs pins used,
@@ -251,17 +309,13 @@ static void pull(int bitmask, int state) {
 // disable previously-set pull-ups.  Write errors are ignored as pins may be
 // in a partially-initialized state.
 static void pinConfigUnload() {
-	char buf[50];
-	int  fd, i;
+	int i;
 
 	if(debug >= 2) printf("%s: Unloading config\n", __progname);
 
-	// Close GPIO file descriptors
+	// GPIO line fds are owned by libgpiod's line_request structures;
+	// they get closed by release_line() below. Just clear poll() state.
 	for(i=0; i<32; i++) {
-		if(p[i].fd >= 0) {
-			close(p[i].fd);
-			p[i].fd = -1;
-		}
 		p[i].events = p[i].revents = 0;
 	}
 
@@ -277,26 +331,18 @@ static void pinConfigUnload() {
 		keyfd1 = -1;
 	}
 
-	// Un-export GPIO pins (0-31)
-	sprintf(buf, "%s/unexport", sysfs_root);
-	if((fd = open(buf, O_WRONLY)) >= 0) {
-		for(i=0; i<32; i++) {
-			// Restore GND items to inputs
-			if(key[i] >= GND) pinSetup(i, "direction", "in");
-			// And un-export all items regardless
-			sprintf(buf, "%d", i);
-			write(fd, buf, strlen(buf));
-		}
-		close(fd);
-	}
-
-	// Disable GPIO pullups (0-31)
-	uint32_t mask = vulcanMask[0] | mcpMask;
+	// Release all GPIO lines (0-31).
+	// GND lines are first flipped back to inputs with no bias so they
+	// don't drive the rail after we release them.
 	for(i=0; i<32; i++) {
-		if((key[i] > KEY_RESERVED) && (key[i] < GND))
-			mask |= (1 << i);
+		if(!line_req[i]) continue;
+		if(key[i] >= GND) {
+			request_line(i, GPIOD_LINE_DIRECTION_INPUT,
+			    GPIOD_LINE_EDGE_NONE,
+			    GPIOD_LINE_BIAS_DISABLED, 0);
+		}
+		release_line(i);
 	}
-	pull(mask, 0); // Disable pullups
 
 	// Do some GPIO dis-configuration for any MCO23017(s).
 	// GNDs are set back to inputs; other config (pullups, etc.)
@@ -339,7 +385,8 @@ static void pinConfigUnload() {
 static void err(char *msg) {
 	printf("%s: %s.  Try 'sudo %s' ?\n", __progname, msg,
 	  program_invocation_name);
-	if(gpio) pinConfigUnload();
+	if(gpio_chip) pinConfigUnload();
+	if(gpio_chip) { gpiod_chip_close(gpio_chip); gpio_chip = NULL; }
 	exit(1);
 }
 
@@ -405,7 +452,7 @@ static void pinConfigLoad() {
 	int              stringLen      = 0,
 	                 wordCount      = 0,
 	                 keyCode        = KEY_RESERVED,
-	                 i, c, k, fd, bitmask, dLevel = -1,
+	                 i, c, k, bitmask, dLevel = -1,
 	                 mcpPin = -1, mcpAddr = -1;
 	bool             readingString  = false,
 	                 isComment      = false;
@@ -622,50 +669,40 @@ static void pinConfigLoad() {
 		if((key[i] > KEY_RESERVED) && (key[i] < GND))
 			bitmask |= (1 << i);
 	}
-	pull(bitmask, 2); // Enable pullups on input pins
+	// Pullup is per-line via GPIOD_LINE_BIAS_PULL_UP below.
 	for(i=0; (i<5) && !vulcanMask[i]; i++); // If no vulcanMask bits,
 	if(i >= 5) key[160] = KEY_RESERVED;     // make sure no vulcanKey
 	// Pullups on MCP23017 devices will be a separate pass later
 
-	// All other GPIO config is handled through the sysfs interface.
-
-	sprintf(buf, "%s/export", sysfs_root);
-	if((fd = open(buf, O_WRONLY)) < 0) // Open Sysfs export file
-		err("Can't open GPIO export file");
+	// Per-line config via libgpiod. One request per pin so each pin gets
+	// its own pollable fd (matches the existing poll() loop shape).
 	intstate[0] = 0;
 	for(i=0; i<32; i++) {
 		if((key[i] == KEY_RESERVED) && !(bitmask & (1<<i)))
 			continue;
-		sprintf(buf, "%d", i);
-		write(fd, buf, strlen(buf));    // Export pin
-		pinSetup(i, "active_low", "0"); // Don't invert
 		if(key[i] >= GND) {
-			// Set pin to output, value 0 (ground)
-			if(pinSetup(i, "direction", "out") ||
-			   pinSetup(i, "value"    , "0"))
+			// GND pin: drive low.
+			if(request_line(i, GPIOD_LINE_DIRECTION_OUTPUT,
+			    GPIOD_LINE_EDGE_NONE,
+			    GPIOD_LINE_BIAS_DISABLED,
+			    GPIOD_LINE_VALUE_INACTIVE))
 				err("Pin config failed (GND)");
 		} else {
-			// Set pin to input, detect edge events
-			char x;
-			// Plain GPIOs: detect both RISING and FALLING
-			// edges.  Port expanders: detect FALLING only.
-			if(pinSetup(i, "direction", "in") ||
-			   pinSetup(i, "edge",
-			    (mcpMask & (1<<i)) ? "falling" : "both")) {
+			// Input pin with pullup. Plain GPIOs: detect BOTH
+			// edges. Port expanders: detect FALLING (active-low
+			// IRQ from MCP23017).
+			int edge = (mcpMask & (1<<i))
+			           ? GPIOD_LINE_EDGE_FALLING
+			           : GPIOD_LINE_EDGE_BOTH;
+			if(request_line(i, GPIOD_LINE_DIRECTION_INPUT,
+			    edge, GPIOD_LINE_BIAS_PULL_UP, 0))
 				err("Pin config failed");
-			}
-			// Get initial pin value.  This is for plain GPIOs
-			// only; MCP23017 will be a separate pass later.
-			sprintf(buf, "%s/gpio%d/value", sysfs_root, i);
-			if((p[i].fd = open(buf, O_RDONLY | O_NONBLOCK)) < 0)
-				err("Can't access pin value");
-			if((read(p[i].fd, &x, 1) == 1) && (x == '0'))
-				intstate[0] |= 1 << i;
-			p[i].events  = POLLPRI | POLLERR | POLLHUP | POLLNVAL;
+			int v = read_line(i);
+			if(v == 0) intstate[0] |= 1 << i;
+			p[i].events  = POLLIN | POLLERR | POLLHUP | POLLNVAL;
 			p[i].revents = 0;
 		}
 	}
-	close(fd); // Done w/Sysfs exporting
 
 	// Set up uinput
 
@@ -950,9 +987,8 @@ static void pollHandler(int i) {
 
 int main(int argc, char *argv[]) {
 
-	char               c;            // Pin input value ('0'/'1')
-	int                fd,           // For mmap, sysfs
-	                   i,            // Generic counter
+	char               c;            // Per-iteration SYN flag
+	int                i,            // Generic counter
 	                   timeout = -1, // poll() timeout
 	                   lastKey = -1; // Last key down (for repeat)
 	uint32_t           pressMask[5]; // For Vulcan pinch detect
@@ -1048,23 +1084,10 @@ int main(int argc, char *argv[]) {
 		printf("%s: running on Rev1 Pi 1 Board\n", __progname);
 	}
 
-	// Although Sysfs provides solid GPIO interrupt handling, there's
-	// no interface to the internal pull-up resistors (this is by
-	// design, being a hardware-dependent feature).  It's necessary to
-	// grapple with the GPIO configuration registers directly to enable
-	// the pull-ups.  Based on GPIO example code by Dom and Gert van
-	// Loo on elinux.org
-	if((fd = open("/dev/mem", O_RDWR | O_SYNC)) < 0)
-		err("Can't open /dev/mem");
-	gpio = mmap(            // Memory-mapped I/O
-	  NULL,                 // Any adddress will do
-	  BLOCK_SIZE,           // Mapped block length
-	  PROT_READ|PROT_WRITE, // Enable read+write
-	  MAP_SHARED,           // Shared with other processes
-	  fd,                   // File to map
-	  bcm_host_get_peripheral_address() + GPIO_BASE);
-	close(fd);              // Not needed after mmap()
-	if(gpio == MAP_FAILED) err("Can't mmap()");
+	// Open the BCM/RP1 GPIO chip via libgpiod. Works on Pi 1-5
+	// without /dev/mem or hard-coded peripheral addresses.
+	gpio_chip = open_gpio_chip();
+	if(!gpio_chip) err("Can't open BCM/RP1 GPIO chip");
 
 	pinConfigLoad();
 
@@ -1087,10 +1110,10 @@ int main(int argc, char *argv[]) {
 	    for(i=0; i<32; i++) {  // For each GPIO bit...
 	      if(p[i].revents) { // Event received?
 	        if(mcpI2C[i]) { // Is port expander (0x20-0x27)
-	          uint8_t c, buf[4], idx = mcpI2C[i] - 0x20; // 0-7
-	          // Must drain fd every time else it triggers forever
-	          lseek(p[i].fd, 0, SEEK_SET);
-	          while(read(p[i].fd, &c, 1) > 0); // Ignore value
+	          uint8_t buf[4], idx = mcpI2C[i] - 0x20; // 0-7
+	          // Must drain edge events every time else POLLIN
+	          // stays asserted and we spin.
+	          drain_line_events(i);
 	          write(i2cfd[idx], &readAddr, 1);
 	          if(read(i2cfd[idx], buf, 4) == 4) { // INTCAP+GPIO
 	            // Buttons pull GPIO low, so invert into intstate[]
@@ -1103,12 +1126,13 @@ int main(int argc, char *argv[]) {
 	            }
 	          }
 	        } else { // Is regular GPIO
-	          // Read current pin state, store in internal state flag,
-	          // flag, but don't issue to uinput yet -- must debounce!
-	          lseek(p[i].fd, 0, SEEK_SET);
-	          read(p[i].fd, &c, 1);
-	          if(c == '0')      intstate[0] |=  (1 << i);
-	          else if(c == '1') intstate[0] &= ~(1 << i);
+	          // Drain edge events, then read current pin level
+	          // and store in internal state flag. Don't issue to
+	          // uinput yet -- must debounce!
+	          drain_line_events(i);
+	          int v = read_line(i);
+	          if(v == 0)      intstate[0] |=  (1 << i);
+	          else if(v == 1) intstate[0] &= ~(1 << i);
 	        }
 	        timeout      = debounceTime;
 	        p[i].revents = 0;
@@ -1216,6 +1240,7 @@ int main(int argc, char *argv[]) {
 	// Clean up --------------------------------------------------------
 
 	pinConfigUnload(); // Close uinput, un-export pins
+	if(gpio_chip) { gpiod_chip_close(gpio_chip); gpio_chip = NULL; }
 
 	if(debug) printf("%s: Done.", __progname);
 
