@@ -8,7 +8,8 @@ echo "\tint   value;"
 echo "} dict;"
 echo
 echo "dict keyTable[] = {"
-# Wrap from KEY_MACRO onward in #if 0; insert the guard exactly once.
+# Wrap KEY_MACRO1 onward in #if 0 (KEY_MACRO itself stays enabled);
+# insert the guard exactly once after the KEY_MACRO entry.
 grep '#define* KEY_' $1 | awk '
   { print "\t{ \"" substr($2, 5) "\", " $2 " }," }
   /MACRO/ && !seen { print "#if 0 // Esoteric keys disabled, smaller program size; edit if needed"; seen = 1 }

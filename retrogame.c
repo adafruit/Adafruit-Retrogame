@@ -79,6 +79,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <poll.h>
 #include <signal.h>
 #include <dirent.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <sys/signalfd.h>
 #include <sys/inotify.h>
@@ -201,9 +202,20 @@ static bool earlyPiDetect(void) {
 	return isEarly;
 }
 
+// Filter for scandir(): match "gpiochipN" device entries.
+static int is_gpiochip_entry(const struct dirent *e) {
+	if(strncmp(e->d_name, "gpiochip", 8) != 0) return 0;
+	// Require at least one digit after "gpiochip".
+	const char *p = e->d_name + 8;
+	if(!*p) return 0;
+	while(*p) { if(*p < '0' || *p > '9') return 0; p++; }
+	return 1;
+}
+
 // Find the BCM GPIO chip ("pinctrl-bcm2835"/"pinctrl-bcm2711"/"pinctrl-rp1")
-// and open it. Walks /dev/gpiochip* asking each chip for its label until one
-// of the known names matches, so the same code works across Pi 1-5.
+// and open it. Enumerates every /dev/gpiochip* via scandir() and matches by
+// label, so it works regardless of how high the pinctrl chip's index lands
+// (overlays, USB GPIO expanders, HAT EEPROM chips, etc. can push it up).
 static struct gpiod_chip *open_gpio_chip(void) {
 	const char *known[] = {
 		"pinctrl-rp1",     // Pi 5
@@ -211,9 +223,13 @@ static struct gpiod_chip *open_gpio_chip(void) {
 		"pinctrl-bcm2835", // Pi 0-3
 		NULL
 	};
-	for(int n=0; n<8; n++) {
-		char path[32];
-		snprintf(path, sizeof(path), "/dev/gpiochip%d", n);
+	struct dirent **list = NULL;
+	int count = scandir("/dev", &list, is_gpiochip_entry, alphasort);
+	if(count < 0) return NULL;
+	struct gpiod_chip *found = NULL;
+	for(int n=0; n<count && !found; n++) {
+		char path[5 + NAME_MAX + 1]; // "/dev/" + d_name + NUL
+		snprintf(path, sizeof(path), "/dev/%s", list[n]->d_name);
 		struct gpiod_chip *c = gpiod_chip_open(path);
 		if(!c) continue;
 		struct gpiod_chip_info *info = gpiod_chip_get_info(c);
@@ -221,15 +237,17 @@ static struct gpiod_chip *open_gpio_chip(void) {
 			const char *label = gpiod_chip_info_get_label(info);
 			for(int k=0; known[k]; k++) {
 				if(label && !strcmp(label, known[k])) {
-					gpiod_chip_info_free(info);
-					return c;
+					found = c;
+					break;
 				}
 			}
 			gpiod_chip_info_free(info);
 		}
-		gpiod_chip_close(c);
+		if(c != found) gpiod_chip_close(c);
 	}
-	return NULL;
+	for(int n=0; n<count; n++) free(list[n]);
+	free(list);
+	return found;
 }
 
 // Request one BCM GPIO line on the main GPIO chip.
@@ -296,12 +314,21 @@ static int read_line(int pin) {
 // libgpiod requires reading edge events to clear the fd's POLLIN, otherwise
 // poll() returns immediately every iteration. Equivalent to the
 // lseek+read("/sys/class/gpio/gpioN/value") drain the sysfs port did.
+// Uses a single shared buffer (lazily allocated on first call) to avoid
+// per-IRQ allocator churn on busy inputs; drains in a loop until empty.
+static struct gpiod_edge_event_buffer *edge_event_buf = NULL;
+#define EDGE_EVENT_BUF_CAP 16
 static void drain_line_events(int pin) {
 	if(!line_req[pin]) return;
-	struct gpiod_edge_event_buffer *buf = gpiod_edge_event_buffer_new(16);
-	if(!buf) return;
-	(void)gpiod_line_request_read_edge_events(line_req[pin], buf, 16);
-	gpiod_edge_event_buffer_free(buf);
+	if(!edge_event_buf) {
+		edge_event_buf = gpiod_edge_event_buffer_new(EDGE_EVENT_BUF_CAP);
+		if(!edge_event_buf) return;
+	}
+	int n;
+	do {
+		n = gpiod_line_request_read_edge_events(line_req[pin],
+		  edge_event_buf, EDGE_EVENT_BUF_CAP);
+	} while(n == EDGE_EVENT_BUF_CAP); // more may be pending
 }
 
 // Restore GPIO and uinput to startup state; un-export any Sysfs pins used,
