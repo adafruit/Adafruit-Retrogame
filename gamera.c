@@ -101,10 +101,16 @@ typedef struct Game {
 // A few function prototypes needed for elements of the subsequent struct.
 // The functions themselves are described later, don't panic.
 static void
-  mameInit(void), mameCommand(Game *, char *), fceuCommand(Game *, char *);
+  mameInit(void);
+static void
+	mameCommand(Game *, char *),
+	fceuCommand(Game *, char *),
+	gboyCommand(Game *, char *);
+
 static int
   mameFilter(const struct dirent *), mameItemize(Game *, int),
-  fceuFilter(const struct dirent *), fceuItemize(Game *, int);
+  fceuFilter(const struct dirent *), fceuItemize(Game *, int),
+  gboyFilter(const struct dirent *), gboyItemize(Game *, int);
 
 // List of supported emulators
 static struct Emulator {
@@ -120,7 +126,9 @@ static struct Emulator {
   { "MAME:", "/boot/advmame/rom", NULL,
      mameInit, mameFilter, NULL     , mameItemize, mameCommand },
   { "NES:" , "/boot/fceu/rom"   , NULL,
-     NULL    , fceuFilter, alphasort, fceuItemize, fceuCommand }
+     NULL    , fceuFilter, alphasort, fceuItemize, fceuCommand },
+  { "GameBoy:", "/boot/gnuboy/rom"   , NULL,
+     NULL    , gboyFilter, alphasort, gboyItemize, gboyCommand }
 };
 #define N_EMULATORS (sizeof(emulator) / sizeof(emulator[0]))
 
@@ -320,6 +328,43 @@ static void mameCommand(Game *g, char *cmdline) {
 	(void)sprintf(cmdline, "advmame -cfg %s %s", mameCfg, g->name);
 }
 
+// GBOY-specific globals and code -----------------------------------------
+
+// gnuboy-specific filter function for scandir() -- given a dirent struct,
+// returns 1 if it's a likely ROM file candidate (ends in .gb).
+static int gboyFilter(const struct dirent *d) {
+	static const char *ext[] = { "gb", "gbc" };
+	char              *ptr;
+	int                i;
+
+	if(((d->d_type == DT_REG) || (d->d_type == DT_LNK)) &&
+	   (d->d_name[0] != '.') && (ptr = strrchr(d->d_name,'.'))) {
+		for(++ptr, i=0; i<sizeof(ext)/sizeof(ext[0]); i++)
+			if(!strcasecmp(ptr, ext[i])) return 1;
+	}
+	return 0;
+}
+
+// After scanning folder for GameBoy ROM files, populate the items[] array with
+// game names with the file extension removed.
+static int gboyItemize(Game *gList, int i) {
+	char *str;
+	for(; gList; gList=gList->next) {
+		if((str = strndup(gList->name,
+		  strrchr(gList->name,'.') - gList->name))) {
+			items[i] = new_item(str, NULL);
+			set_item_userptr(items[i++], gList);
+		}
+	}
+	return i; // Return next items[] index
+}
+
+// Given a Game struct and an output buffer, format a command string
+// for invoking fbgnuboy via system()
+static void gboyCommand(Game *g, char *cmdline) {
+	(void)sprintf(cmdline, "fbgnuboy \"%s/%s\"",
+	  emulator[g->emu].romPath, g->name);
+}
 // NES-specific globals and code -----------------------------------------
 
 // fceu-specific filter function for scandir() -- given a dirent struct,
@@ -446,7 +491,7 @@ int find_roms(void) {
 	  (items = (ITEM**)malloc((nGames+nEmuTitles+1) * sizeof(ITEM *)))) {
 		i = 0;
 		for(e=0; e<N_EMULATORS; e++) {
-			if(nEmuTitles) {
+			if(nEmuTitles && emulator[e].gameList) {
 				// Add non-selectable emulator title
 				items[i] = new_item(emulator[e].title, NULL);
 				item_opts_off(items[i++], O_SELECTABLE);
