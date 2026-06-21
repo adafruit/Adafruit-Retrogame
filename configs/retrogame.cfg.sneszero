@@ -1,0 +1,16 @@
+# Pin configuration for SNES Zero.
+# http://www.prs-tech.com/Tutorials/SNES-Zero/snes-zero.html
+# https://hackaday.io/project/16288-raspberry-pi-zero-inside-an-snes-controller
+
+LEFT      23  # Joypad left
+RIGHT      0  # Joypad right
+UP        22  # Joypad up
+DOWN       1  # Joypad down
+Z         16  # 'A' button
+X          6  # 'B' button
+ESC        5  # 'Select' button
+ENTER     12  # 'Start' button
+S         26  # 'X' button
+A         19  # 'Y' button
+Q         21  # Left shoulder button
+W         20  # Right shoulder button
